@@ -938,12 +938,12 @@ table(pbmc_integrated@meta.data$Lymphodepletion)
 # Sub-cluster 4
 Idents(pbmc_integrated) <- "integrated_sct_snn_res.0.2"
 pbmc_integrated_sbclstr_4 <- FindSubCluster(pbmc_integrated, "4", resolution = 0.05, graph.name = "integrated_sct_snn")
-DimPlot(pbmc_integrated_sbclstr_4, group.by = "sub.cluster", label = T)
+#DimPlot(pbmc_integrated_sbclstr_4, group.by = "sub.cluster", label = T)
 
 # Sub-cluster 12
 Idents(pbmc_integrated_sbclstr_4) <- "sub.cluster"
 pbmc_integrated_sbclstr_4_12 <- FindSubCluster(pbmc_integrated_sbclstr_4, "12", resolution = 0.01, graph.name = "integrated_sct_snn")
-DimPlot(pbmc_integrated_sbclstr_4_12, group.by = "sub.cluster", label = T)
+#DimPlot(pbmc_integrated_sbclstr_4_12, group.by = "sub.cluster", label = T)
 
 
 # Add a label in meta called CT
@@ -1075,6 +1075,59 @@ pbmc_integrated_sbclstr_4_12@meta.data$CART <- ifelse(
   (pbmc_integrated_sbclstr_4_12@meta.data$IL13OPCounts >= 3 & (pbmc_integrated_sbclstr_4_12@meta.data$CT == "CD8+ T" | pbmc_integrated_sbclstr_4_12@meta.data$CT == "CD4+ T" | pbmc_integrated_sbclstr_4_12@meta.data$CT == "Treg" )), "Positive", "Negative")
 
 table(pbmc_integrated_sbclstr_4_12@meta.data$CART)
+
+
+#------------------------------------------------------------------------------#
+### Add response information full object ----
+#------------------------------------------------------------------------------#
+pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle <- paste(pbmc_integrated_sbclstr_4_12@meta.data$UPN, pbmc_integrated_sbclstr_4_12@meta.data$Cycle, sep = "_")
+levels(as.factor(pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle))
+
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon <- NA # or any other initialization value
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_5"] <- "Non-Response" # Stable, I originally had this as response but after talking to Leo we decided to change this to stable/non-response
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_8"] <- "Response"
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_4"] <- "Response"
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_8"] <- "Non-Response" # Stable
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_11"] <- "Non-Response" # Progression
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_8"] <- "Non-Response" # Progression
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_3"] <- "Non-Response" # Pseudoprogression
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_1"] <- "Non-Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_3"] <- "Non-Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_4"] <- "Non-Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_1"] <- "Non-Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_4"] <- "Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_7"] <- "Non-Response" 
+
+pbmc_integrated_sbclstr_4_12@meta.data$Responses <- NA # or any other initialization value
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_5"] <- "Stable" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_8"] <- "Response"
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_4"] <- "Response"
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_8"] <- "Stable"
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_11"] <- "Progression"
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_8"] <- "Progression"
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_3"] <- "Pseudoprogression" # Do we change to stable?
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_3"] <- "Progression" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_4"] <- "Progression" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_4"] <- "Response" 
+pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_7"] <- "Progression" 
+
+table(pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon)
+table(pbmc_integrated_sbclstr_4_12@meta.data$Responses)
+
+
+#------------------------------------------------------------------------------#
+### Add lymphodepletion information full object ----
+#------------------------------------------------------------------------------#
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion <- NA # or any other initialization value
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "625"] <- "Lymphodepleted" 
+pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "626"] <- "Lymphodepleted" 
+
+table(pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion)
 
 
 #------------------------------------------------------------------------------#
