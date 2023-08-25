@@ -25,9 +25,13 @@ All sample types (CSF, PBMCs, product, and tumors) were preprocessed and integra
 Many of these scripts use helper functions which can be found here: https://github.com/Banovich-Lab/SingleCellBestPractices/blob/main/scripts/preprocessing_qc_module.R and here: https://github.com/Banovich-Lab/19130_Pediatric_CART/processing_scripts/helper_functions_module.R
 
 ### Manuscript figures
-`Banovich-Lab/19130_Pediatric_CART/figure_scripts/` contain code to generate the visualizaitons referenced in the paper. All rds objects can be found on GEO (ADD INFO HERE).
+`Banovich-Lab/19130_Pediatric_CART/figure_scripts/` contain code to generate the visualizaitons referenced in the paper. All rds input objects can be found on GEO (ADD INFO HERE).
 
 `Figure_03.R`
--  **Inputs:**  CSF (`CSF_all_cells_obj_2023.rds`) and PBMC (`PBMC_all_cells_obj_2023.rds`) integrated objects.
+-  **Inputs:**  CSF (`CSF_all_cells_obj_2023.rds`) and PBMC (`PBMC_all_cells_obj_2023.rds`) T cell integrated objects.
 -  **Output:** ` Figure_03.pdf`
+
+`Figure_04.R`
+-  **Inputs:**  CSF (`CSF_T_cell_obj_2023.rds`) and PBMC (`PBMC_T_cell_obj_2023.rds`) integrated objects.
+-  **Output:** ` Figure_04.pdf`
 
