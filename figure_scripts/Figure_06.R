@@ -168,7 +168,6 @@ csf_TCRs_574_unexp <- csf_obj_T_TCR_meta_subNA %>%
   filter(!(CTstrict %in% csf_TCRs_exp_574)) %>%
   pull("CTstrict") %>% unique()
 
-
 # Get TCRs from PBMCs and product
 pbmc_obj_T_meta <- pbmc_obj_T@meta.data
 product_obj_T_meta <- product_obj_T@meta.data
@@ -178,15 +177,12 @@ pbmcs_TCRs_574 <- pbmc_obj_T_meta_NA_rm %>%
   filter(UPN == 574) %>%
   pull("CTstrict") %>% unique()
 
-
 product_obj_T_meta_NA_rm <- product_obj_T_meta[is.na(product_obj_T_meta$Frequency) == F, ]
 product_TCRs_574 <- product_obj_T_meta_NA_rm %>%
   filter(UPN == 574) %>%
   pull("CTstrict") %>% unique()
 
-
-
-
+# Make list of TCRs to plot
 tcr_list_574_all <- list(Tumor = tcrs_574, Expanded_CSF = csf_TCRs_exp_574,
                          Unexpanded_CSF = csf_TCRs_574_unexp,
                          Product = product_TCRs_574, PBMC = pbmcs_TCRs_574)
