@@ -2,9 +2,7 @@
 # Author : Angela M. Oill, aoill@tgen.org
 # Date: 2023/06/27
 # Project: Pediatric CAR-T 
-# Description: Potential scRNA figure 2 and related figures
-# All figures associated with T cell landscape section (including supplemental
-# figures)
+# Description: Figure 4
 #==============================================================================#
 
 
