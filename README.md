@@ -1,6 +1,6 @@
 # README.md
 
-Single cell analyses for 19130 pediatric CART project
+Single cell analyses for 19130 pediatric CART project.
 
 ## Scripts
 
@@ -42,4 +42,8 @@ Many of these scripts use helper functions which can be found here: https://gith
 `Figure_06.R`
 -  **Inputs:**  Tumor immune cell integrated object (`Tumor_immune_cells_obj_2023.rds`), and Tumor (`Tumor_T_cells_obj_2023.rds`), CSF (`CSF_T_cell_obj_2023.rds`), PBMC (`PBMC_T_cell_obj_2023.rds`), and product (`product_T_cell_obj_2023.rds`) T cell integrated objects.
 -  **Output:** ` Figure_06.pdf`
+
+`Figure_S01.R`
+-  **Inputs:**  CSF integrated object (`CSF_all_cells_obj_2023.rds`).
+-  **Output:** ` Figure_S01.pdf`
 
