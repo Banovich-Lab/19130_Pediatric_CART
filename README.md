@@ -51,3 +51,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 -  **Inputs:**  PBMC integrated object (`PBMC_all_cells_obj_2023.rds`).
 -  **Output:** ` Figure_S02.pdf`
 
+`Figure_S03.R`
+-  **Inputs:**  CSF + PBMC integrated object (`CSF_PBMC_all_cells_obj_2023.rds`).
+-  **Output:** ` Figure_S03.pdf`
+
