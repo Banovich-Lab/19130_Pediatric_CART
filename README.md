@@ -28,6 +28,6 @@ Many of these scripts use helper functions which can be found here: https://gith
 `/figure_scripts/` contain code to generate the visualizaitons referenced in the paper. All objects can be found on GEO (ADD INFO HERE).
 
 `Figure_03.R`
-- **Inputs:** CSF (`CSF_all_cells_obj_2023.rds`) and PBMC (`PBMC_all_cells_obj_2023.rds`) integrated objects.
-- **Output:** `Figure_03.pdf`
+-  **Inputs:**  CSF (`CSF_all_cells_obj_2023.rds`) and PBMC (`PBMC_all_cells_obj_2023.rds`) integrated objects.
+-  **Output:** ` Figure_03.pdf`
 
