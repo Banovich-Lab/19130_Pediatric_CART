@@ -39,3 +39,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 -  **Inputs:**  CSF (`CSF_T_cell_obj_2023.rds`), PBMC (`PBMC_T_cell_obj_2023.rds`), and product (`product_T_cell_obj_2023.rds`) T cell integrated objects.
 -  **Output:** ` Figure_05.pdf`
 
+`Figure_06.R`
+-  **Inputs:**  Tumor immune cell integrated object (`Tumor_immune_cells_obj_2023.rds`), and Tumor (`Tumor_T_cells_obj_2023.rds`), CSF (`CSF_T_cell_obj_2023.rds`), PBMC (`PBMC_T_cell_obj_2023.rds`), and product (`product_T_cell_obj_2023.rds`) T cell integrated objects.
+-  **Output:** ` Figure_06.pdf`
+
