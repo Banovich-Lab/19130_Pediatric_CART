@@ -82,3 +82,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 `Figure_S09.R`
 -  **Inputs:**  CSF T cell integrated object (`CSF_T_cell_obj_2023.rds`).
 -  **Output:** ` Figure_S09.pdf`
+
+`Figure_S10.R`
+-  **Inputs:**  10x count matricies for CSF, PBMCs, Product, and tumors.
+-  **Output:** ` Figure_10.pdf`
