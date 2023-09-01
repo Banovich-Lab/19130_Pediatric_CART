@@ -18,13 +18,11 @@ library(dittoSeq)
 library(scProportionTest)
 library(viridis)
 library(ComplexHeatmap)
-#library(scGSVA)
 
 
 #==============================================================================#
 # Read in integrated object ----
 #==============================================================================#
-pbmc_obj_T <- readRDS("/scratch/aoill/projects/CAR-T/00_final/rds_files/pbmc_T_cells_DRAFT_20230516.rds")
 pbmc_obj_T <- readRDS("/scratch/aoill/projects/CAR-T/00_final/00_GEO_rds/PBMC_T_cell_obj_2023.rds")
 
 
