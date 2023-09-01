@@ -74,3 +74,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 `Figure_S07.R`
 -  **Inputs:**  Product T cell integrated object (`product_T_cell_obj_2023.rds`).
 -  **Output:** ` Figure_S07.pdf`
+
+`Figure_S08.R`
+-  **Inputs:**  CSF T cell integrated object (`CSF_T_cell_obj_2023.rds`).
+-  **Output:** ` Figure_S08.pdf`
