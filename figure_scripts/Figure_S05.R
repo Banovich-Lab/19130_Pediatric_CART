@@ -161,7 +161,7 @@ hp <- ComplexHeatmap::Heatmap((exp_mat), # t(exp_mat)
                               border = "black")
 
 
-pdf("/home/aoill/plots/Figure_05.pdf",
+pdf("/home/aoill/plots/Figure_S05.pdf",
     width = 7, height = 7)
 draw(hp, annotation_legend_list = lgd_list) 
 dev.off()
