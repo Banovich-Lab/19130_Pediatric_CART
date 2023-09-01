@@ -55,3 +55,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 -  **Inputs:**  CSF + PBMC integrated object (`CSF_PBMC_all_cells_obj_2023.rds`).
 -  **Output:** ` Figure_S03.pdf`
 
+`Figure_S04.R`
+-  **Inputs:**  CSF T cell integrated object (`CSF_T_cell_obj_2023.rds`).
+-  **Output:** ` Figure_S04.pdf`
+
