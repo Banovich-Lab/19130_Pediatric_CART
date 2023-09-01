@@ -138,7 +138,7 @@ p3 <- permutation_plot(prop_test) +
 #          row.names = F, quote = F)
 
 
-pdf("/home/aoill/plots/Figure_S03",
+pdf("/home/aoill/plots/Figure_S03.pdf",
     height = 7, width = 9)
 ggarrange(ggarrange(pa, pb), 
           ggarrange(p2, p3, 
