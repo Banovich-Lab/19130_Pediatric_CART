@@ -27,7 +27,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 ### Manuscript figures
 `Banovich-Lab/19130_Pediatric_CART/figure_scripts/` contain code to generate the visualizaitons referenced in the paper. All rds input objects can be found on GEO (ADD INFO HERE).
 
- **Main text figures**
+#### Main text figures
  
 `Figure_03.R`
 -  **Inputs:**  CSF (`CSF_all_cells_obj_2023.rds`) and PBMC (`PBMC_all_cells_obj_2023.rds`) integrated objects.
@@ -45,7 +45,7 @@ Many of these scripts use helper functions which can be found here: https://gith
 -  **Inputs:**  Tumor immune cell integrated object (`Tumor_immune_cells_obj_2023.rds`), and Tumor (`Tumor_T_cells_obj_2023.rds`), CSF (`CSF_T_cell_obj_2023.rds`), PBMC (`PBMC_T_cell_obj_2023.rds`), and product (`product_T_cell_obj_2023.rds`) T cell integrated objects.
 -  **Output:** ` Figure_06.pdf`
 
- **Supplemental figures**
+ #### Supplemental figures
 
 `Figure_S01.R`
 -  **Inputs:**  CSF integrated object (`CSF_all_cells_obj_2023.rds`).
