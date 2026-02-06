@@ -2,8 +2,8 @@
 
 1. `demux_prep_vcfs.sh` - Merge in filter variants by batch
 2. `mpileup.sh` - quantify RNA reads per variant sites
-  - input: .fa file, .txt file of .cram file path, .vcf file (zipped)
-  - output: mpileup file
+     - input: .fa file, .txt file of .cram file path, .vcf file (zipped)
+     - output: mpileup file
 2. mpileup_plots.R - visualise the mpileup output and make .bed files
 - input: mpileup file
 - output: filtered .bed file
