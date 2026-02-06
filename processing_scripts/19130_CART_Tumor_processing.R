@@ -625,22 +625,7 @@ combined2 <- lapply(names(combined), function(i){
 })
 names(combined2) <- c("F05627_574_Tumor", "F05630_625_Tumor")
 
-
-
-tumor_merge_immune_TCR <- combineExpression(combined2, tumor_merge_immune,
-                                            #group.by = "UPN_Cycle_Day_Sample_Type",
-                                            group.by = "sample",
-                                            filterNA = FALSE,
-                                            proportion = FALSE,
-                                            cloneCall="strict",
-                                            cloneSize=c(Single=1, Small=5, Medium=20, Large=100, Hyperexpanded=500))
-
-slot(tumor_merge_immune_TCR, "meta.data")$cloneSize <- factor(slot(tumor_merge_immune_TCR, "meta.data")$cloneSize, 
-                                                              levels = c("Hyperexpanded (100 < X <= 500)", "Large (20 < X <= 100)", 
-                                                                         "Medium (5 < X <= 20)", "Small (1 < X <= 5)", 
-                                                                         "Single (0 < X <= 1)", NA))
-
-table(tumor_merge_immune_TCR@meta.data$cloneSize)
+saveRDS(combined2, "/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/tumor_scRepertiore_output.rds")
 
 
 #==============================================================================#
@@ -670,6 +655,12 @@ tumor_imm_notumor@meta.data$ct_final[tumor_imm_notumor@meta.data$SCT_snn_res.0.3
 tumor_imm_notumor@meta.data$ct_final[tumor_imm_notumor@meta.data$SCT_snn_res.0.3 == "6"] <- "cDC2"
 
 
+#==============================================================================#
+# Add additional metadata ----
+#==============================================================================#
+tumor_merge_immune_TCR@meta.data$tumor_type <- NA # or any other initialization value
+tumor_merge_immune_TCR@meta.data$tumor_type[tumor_imm@meta.data$UPN == "574"] <- "Ependymoma"
+tumor_merge_immune_TCR@meta.data$tumor_type[tumor_imm@meta.data$UPN == "625"] <- "Ependymoma" 
+
 
 saveRDS(tumor_merge_immune_TCR, "/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/tumor_immune_seurat_obj.rds")
-saveRDS(combined2, "/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/tumor_scRepertiore_output.rds")
