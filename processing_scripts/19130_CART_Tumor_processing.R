@@ -524,10 +524,10 @@ tumor_merge_immune <- FindClusters(tumor_merge_immune, resolution = c(0.1, 0.2, 
 #------------------------------------------------------------------------------#
 ## Add CART information to Immune object ----
 #------------------------------------------------------------------------------#
-DefaultAssay(tumor_merge_immune) <- "SoupX_RNA"
+DefaultAssay(tumor_merge_immune) <- "RNA"
 tumor_merge_immune <- JoinLayers(tumor_merge_immune)
 
-tumor_merge_immune@meta.data$IL13OPCounts <- tumor_merge_immune[["SoupX_RNA"]]$counts["IL13OP",]
+tumor_merge_immune@meta.data$IL13OPCounts <- tumor_merge_immune[["RNA"]]$counts["IL13OP",]
 tumor_merge_immune@meta.data$CART <- ifelse(
   (tumor_merge_immune@meta.data$IL13OPCounts >= 3), "Positive", "Negative")
 
