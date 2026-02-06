@@ -487,11 +487,6 @@ for (i in 1:length(seurat_list_separated_SoupX_batch)) {
 }
 
 
-# Save this object
-saveRDS(seurat_list_separated_SoupX_batch, "/scratch/aoill/projects/CAR-T/00_new_2025/rds_files/CSF_seurat_list_separated_SoupX_batch_DoubletFinder_dblrate_0.15_2025_09_17.rds")
-
-
-
 for (i in 1:length(seurat_list_separated_SoupX_batch)) {
   DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) = "SoupX_RNA"
   seurat_list_separated_SoupX_batch[[i]] = SCTransform(seurat_list_separated_SoupX_batch[[i]], 
