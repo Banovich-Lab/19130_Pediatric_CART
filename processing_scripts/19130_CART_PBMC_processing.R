@@ -1,8 +1,8 @@
 #==============================================================================#
 # Author : Angela M. Oill, aoill@tgen.org
-# Date: 2023/06/09
+# Date: 2025/04/21
 # Project: Pediatric CAR-T 
-# Description: Preprocessing and integration of PBMC samples
+# Description: Pre-processing and integration of PBMC samples
 #==============================================================================#
 
 
@@ -17,6 +17,7 @@ library(DropletUtils)
 library(scRepertoire)
 library(scGSVA)
 library(RColorBrewer)
+library(tidyr)
 
 
 source("/home/aoill/projects/SingleCellBestPractices/scripts/preprocessing_qc_module.R")
@@ -30,7 +31,8 @@ set.seed(1234)
 options(future.globals.maxSize = 30000 * 1024^2)
 
 # Path to google sheet with metadata for your samples
-metapath <- "https://docs.google.com/spreadsheets/d/1gRL53qgRBApRHxznwTK_17I1cRlAL0GGf8nMikOJle0/edit#gid=0"
+#metapath <- "https://docs.google.com/spreadsheets/d/1gRL53qgRBApRHxznwTK_17I1cRlAL0GGf8nMikOJle0/edit#gid=0"
+metapath <- "/home/aoill/projects/CAR-T/00_new_2025/19130_all_batches_metadata_new.csv"
 sheet_name <- "Sheet1"
 
 
@@ -41,21 +43,34 @@ sheet_name <- "Sheet1"
 #--------------------#
 ## Read metadata ----
 #--------------------#
-sample_metadata <- load_metadata(metadata_path = metapath, data_type = "googlesheet", sheet_name = sheet_name)
+sample_metadata <- load_metadata(metadata_path = metapath, data_type = "csv", sheet_name = sheet_name)
 
 #-----------------------------------#
 ## Separate multiplexed samples ----
 #-----------------------------------#
-sample_metadata_multiplexed <- sample_metadata %>% filter(Multiplexed == "Yes")
+# original data
+sample_metadata_multiplexed_original <- sample_metadata %>% 
+  filter(Multiplexed == "Yes") %>% 
+  filter(Batch %in% c(37, 38, 39, 40))
 
-sample_metadata_not_multiplexed <- sample_metadata %>% filter(Multiplexed == "No")
+# new data
+sample_metadata_multiplexed_new <- sample_metadata %>% 
+  filter(Multiplexed == "Yes") %>% 
+  filter(Batch %in% c(1, 7, 8, 9, 10))
+
+# no pbmc samples that weren't multiplexed
+#sample_metadata_not_multiplexed <- sample_metadata %>% filter(Multiplexed == "No")
 
 
 #==============================================================================#
 # Demultiplex ----
 #==============================================================================#
+
+#--------------------------#
+## Hash demultiplexing ----
+#--------------------------#
 seurat_list_demultiplexed <- prep_seurat_list_multiplexed(
-  sample_metadata_multiplexed, 
+  sample_metadata_multiplexed_original, 
   batch_ID = "Cell_Prefix", 
   cellRanger_path = "CellRanger_path", 
   cell_ID_prefix = "Cell_Prefix", 
@@ -78,15 +93,136 @@ names(pbmc_seurat_list_demultiplexed_singlets) <- c("Batch37_filtered", "Batch38
 pbmc_seurat_list <- pbmc_seurat_list_demultiplexed_singlets
 
 
+#--------------------#
+## New data ----
+#--------------------#
+# This data is multiplexed and was demultiplexed using demuxlet. I have a file 
+# for each batch with which cells are singlets/doublets/ambiguous and which 
+# sample it belongs to (demuxlet.best). I will need to join this to the metadata
+# based on the cell ID then only keep singlets and split the objects by sample.
+# After this proceed like 
+metadata = sample_metadata_multiplexed_new
+batch_ID = "Cell_Prefix"
+cellRanger_path = "CellRanger_path"
+cell_ID_prefix = "Cell_Prefix"
+
+sample_list <- unique(metadata[[batch_ID]])
+
+
+sample_seurat_list <- lapply(sample_list, function(i){
+  message(i)
+  print(paste("Reading in ", 
+              length(unique(paste0(metadata[which(metadata[[batch_ID]]==i),][[cellRanger_path]], "/outs/filtered_feature_bc_matrix/"))), " file.",
+              sep = ""
+  )
+  )
+  print(unique(paste0(metadata[which(metadata[[batch_ID]]==i),][[cellRanger_path]], "/outs/filtered_feature_bc_matrix/")))
+  sample_10x_data <- Read10X(unique(paste0(metadata[which(metadata[[batch_ID]]==i),][[cellRanger_path]], "/outs/filtered_feature_bc_matrix/")))
+  print("Read in 10X file")
+  seurat_object <- CreateSeuratObject(counts = sample_10x_data)
+  seurat_object <- PercentageFeatureSet(seurat_object, pattern = "^MT-", col.name = "percent.mt_RNA", assay = "RNA")
+  seurat_object <- PercentageFeatureSet(seurat_object, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_RNA", assay = "RNA")
+  seurat_object@meta.data$orig_cellID <- rownames(seurat_object@meta.data)
+  print("Added in info to objet")
+  
+  # add souporcell results here
+  soc_fn <- paste("/scratch/aoill/projects/CAR-T/00_new_2025/souporcell/", tolower(i), "_results.tsv", sep = "")
+  soc_results <- read.table(soc_fn, header = T)
+  print("Read in souporcell results")
+  
+  
+  # Make a BARCODE column in metadata so that I can join the demuxlet results
+  seurat_object@meta.data$barcode <- seurat_object@meta.data$orig_cellID
+  seurat_object@meta.data$barcode <- sub("^[^_]+_", "", seurat_object@meta.data$barcode)
+  
+  dim(seurat_object@meta.data)
+  
+  rn_meta <- rownames(seurat_object@meta.data)
+  seurat_object@meta.data <- left_join(seurat_object@meta.data, soc_results)
+  rownames(seurat_object@meta.data) <- rn_meta
+  dim(seurat_object@meta.data)
+  
+  # Rename cell IDs, adding a prefix specified by the user
+  seurat_object <- RenameCells(seurat_object,
+                               new.names = paste0(metadata[which(metadata[[batch_ID]]==i),][[cell_ID_prefix]], 
+                                                  "_", colnames(seurat_object)))
+  
+  # Keep only singlets
+  #seurat_object <- subset(seurat_object, subset = DROPLET.TYPE == "SNG")
+  seurat_object <- subset(seurat_object, subset = status == "singlet")
+  
+  # Add a column called UPN from BEST.GUESS column
+  # this was from demuxlet outs, doesnt need to be done with the soupor
+  seurat_object@meta.data$sample_ID <- sub(",.*", "", seurat_object@meta.data$sample_ID)
+  
+  
+  # Add UPN column based on ID in BEST.GUESS
+  upn_map <- c(
+    "PEDCAR_0002_1_PB_Whole_C1" = 514,
+    "PEDCAR_0003_1_PB_Whole_C1" = 574,
+    "PEDCAR_0004_1_PB_Whole_C1" = 689,
+    "PEDCAR_0005_1_PB_Whole_C1" = 692,
+    "PEDCAR_0006_1_PB_Whole_C1" = 705,
+    "PEDCAR_0007_1_PB_Whole_C1" = 716
+  )
+  
+  # Add UPN column to Seurat metadata
+  seurat_object@meta.data$UPN <- upn_map[seurat_object@meta.data$sample_ID]
+  
+  # Add other metadata to object
+  batch.meta.data <- metadata[which(metadata[[batch_ID]]==i),]
+  rn_s_meta <- rownames(seurat_object@meta.data)
+  seurat_object@meta.data <- left_join(seurat_object@meta.data, batch.meta.data)
+  rownames(seurat_object@meta.data) <- rn_s_meta
+  # then I should have a list of seurat object, one for each batch
+  table(seurat_object@meta.data$UPN)
+  
+  return(seurat_object)
+})
+names(sample_seurat_list) <- sample_list
+
+
+# Add together and then look at smooth scatter plots
+pbmc_seurat_list_all <- c(pbmc_seurat_list, sample_seurat_list)
+
+
 #==============================================================================#
 # Filter ----
 #==============================================================================#
-pbmc_seurat_list_filtered <- filter_manual(pbmc_seurat_list, 
+
+#----------------------------------------#
+## Merge Seurat and visualize quality ----
+#----------------------------------------#
+pbmc_seurat_merge <- merge(x = pbmc_seurat_list_all[[1]], y = pbmc_seurat_list_all[2:length(pbmc_seurat_list_all)])
+pbmc_seurat_merge@meta.data$New_Ident <- "SeuratProject"
+Idents(pbmc_seurat_merge) <- "New_Ident"
+
+# %mt log(nFeature_RNA)
+smoothScatter(pbmc_seurat_merge@meta.data$percent.mt, log(pbmc_seurat_merge@meta.data$nFeature_RNA),
+              xlab = "% MT", ylab = "log(nFeature_RNA)",
+              main = "PBMCs")
+abline(h = log(650), v = 10)
+text(15,log(750), "nFeature_RNA = 650,\npercent.mt = 10", adj = c(0, -.1))
+
+
+# %mt log(nCount_RNA)
+smoothScatter(pbmc_seurat_merge@meta.data$percent.mt, log(pbmc_seurat_merge@meta.data$nCount_RNA),
+              xlab = "% MT", ylab = "log(nCount_RNA)",
+              main = "PBMCs")
+abline(h = log(1200), v = 10)
+text(15,log(1300), "nCount_RNA = 1200,\npercent.mt = 10", adj = c(0, -.1))
+
+# I think the same filter as before works
+
+#-------------#
+## Filter ----
+#-------------#
+pbmc_seurat_list_filtered <- filter_manual(pbmc_seurat_list_all, 
                                            pt_mt = 10, 
                                            nFeature = 650,
                                            nCount = 1200)
 
-seurat_list_separated <- list()
+pbmc_seurat_list_separated <- list()
 for (i in 1:length(pbmc_seurat_list_filtered)) {
   print(i)
   
@@ -98,17 +234,17 @@ for (i in 1:length(pbmc_seurat_list_filtered)) {
                                           pedi_batch@meta.data$Batch,
                                           sep = "_")
   pedi_batch <- Seurat::SplitObject(pedi_batch, split.by = "Sample_ID")
-  seurat_list_separated <- c(seurat_list_separated, pedi_batch)
+  pbmc_seurat_list_separated <- c(pbmc_seurat_list_separated, pedi_batch)
 }
 
 
-for (i in 1:length(seurat_list_separated)) {
-  print(paste0("Converting sample ", names(seurat_list_separated[i])))
-  obj.sub <- seurat_list_separated[[i]]
-  DropletUtils::write10xCounts(path = paste0("/scratch/aoill/projects/CAR-T/00_final/soupX/demultiplexed_",names(seurat_list_separated[i])), 
-                               x = obj.sub[["RNA"]]@data, 
-                               barcodes = colnames(obj.sub[["RNA"]]@data), # cell names
-                               gene.id = rownames(obj.sub[["RNA"]]@data), # Gene identifiers, one per row of X
+for (i in 1:length(pbmc_seurat_list_separated)) {
+  print(paste0("Converting sample ", names(pbmc_seurat_list_separated[i])))
+  obj.sub <- pbmc_seurat_list_separated[[i]]
+  DropletUtils::write10xCounts(path = paste0("/scratch/aoill/projects/CAR-T/00_new_2025/soupX/demultiplexed_",names(pbmc_seurat_list_separated[i])), 
+                               x = obj.sub[["RNA"]]@layers$counts, 
+                               barcodes = colnames(obj.sub[["RNA"]]), # cell names
+                               gene.id = rownames(obj.sub[["RNA"]]), # Gene identifiers, one per row of X
                                type = "sparse", version="3", overwrite = T)
 }
 
@@ -116,88 +252,145 @@ for (i in 1:length(seurat_list_separated)) {
 #-----------------------------------------------------#
 ## Get number of cells before and after filtering ----
 #-----------------------------------------------------#
-seurat_merge <- merge(x = pbmc_seurat_list[[1]], y = pbmc_seurat_list[2:length(pbmc_seurat_list)])
-seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste0(seurat_merge@meta.data$UPN, "_",
-                                                                 seurat_merge@meta.data$Cycle,  "_", 
-                                                                 seurat_merge@meta.data$Day, "_",
-                                                                 seurat_merge@meta.data$Sample_Type, "_",
-                                                                 seurat_merge@meta.data$Batch)
-table(seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch)
+pbmc_seurat_merge <- merge(x = pbmc_seurat_list_all[[1]], y = pbmc_seurat_list_all[2:length(pbmc_seurat_list_all)])
+pbmc_seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste0(pbmc_seurat_merge@meta.data$UPN, "_",
+                                                                      pbmc_seurat_merge@meta.data$Cycle,  "_", 
+                                                                      pbmc_seurat_merge@meta.data$Day, "_",
+                                                                      pbmc_seurat_merge@meta.data$Sample_Type, "_",
+                                                                      pbmc_seurat_merge@meta.data$Batch)
+cell_numbers <- as.data.frame(table(pbmc_seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch))
+colnames(cell_numbers) <- c("Sample", "Unfiltered")
 
-seurat_merge <- merge(x = pbmc_seurat_list_filtered[[1]], y = pbmc_seurat_list_filtered[2:length(pbmc_seurat_list_filtered)])
-seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste0(seurat_merge@meta.data$UPN, "_",
-                                                                 seurat_merge@meta.data$Cycle,  "_", 
-                                                                 seurat_merge@meta.data$Day, "_",
-                                                                 seurat_merge@meta.data$Sample_Type, "_",
-                                                                 seurat_merge@meta.data$Batch)
-table(seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch)
+pbmc_seurat_merge <- merge(x = pbmc_seurat_list_filtered[[1]], y = pbmc_seurat_list_filtered[2:length(pbmc_seurat_list_filtered)])
+pbmc_seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste0(pbmc_seurat_merge@meta.data$UPN, "_",
+                                                                      pbmc_seurat_merge@meta.data$Cycle,  "_", 
+                                                                      pbmc_seurat_merge@meta.data$Day, "_",
+                                                                      pbmc_seurat_merge@meta.data$Sample_Type, "_",
+                                                                      pbmc_seurat_merge@meta.data$Batch)
+cell_numbers_filtered <- as.data.frame(table(pbmc_seurat_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch))
+colnames(cell_numbers_filtered) <- c("Sample", "Filtered")
+
+cell_numbers_all <- join(cell_numbers, cell_numbers_filtered)
+cell_numbers_all$prop_keep <- cell_numbers_all$Filtered/cell_numbers_all$Unfiltered
+
+
+cell_numbers_all <- cell_numbers_all %>% separate_wider_delim(Sample, delim = "_", names = c("UPN", "Cycle", "Day", "Sample_Type", "Batch"))
+sum(cell_numbers_all$Unfiltered)
+# 204171
+sum(cell_numbers_all$Filtered)
+# 191556
+
+
+# Cell numbers of new samples
+cell_numbers_all %>% filter(Batch %in% c("1", "7", "8", "9", "10")) %>% 
+  dplyr::select(Unfiltered) %>% sum()
+# 172141
+cell_numbers_all %>% filter(Batch %in% c("1", "7", "8", "9", "10")) %>% 
+  dplyr::select(Filtered) %>% sum()
+# 166942
+
+print(cell_numbers_all, n = nrow(cell_numbers_all))
 
 
 #==============================================================================#
 # Run SoupX ----
 #==============================================================================#
-pbmc_samples <- names(seurat_list_separated)
+# Filter out 689_PBMC_8_1_8 before running 
+name_to_remove <- "689_PBMC_8_1_8"
+pbmc_seurat_list_separated_subset <- pbmc_seurat_list_separated[names(pbmc_seurat_list_separated) != name_to_remove]
 
-#-----------------------------------------#
-## Run SoupX on demultiplexed samples ----
-#-----------------------------------------#
+
 # Extract product samples from these above objects
-sample_list <- pbmc_samples
+sample_list <- names(pbmc_seurat_list_separated_subset)
+
 
 pbmc_seurat_list_separated_SoupX <- sapply(sample_list,  function(i){
   print(i)
   # Read in count and droplet data
-  d10x_toc <- Read10X(paste0("/scratch/aoill/projects/CAR-T/00_final/soupX/demultiplexed_", i))
+  d10x_toc <- Read10X(paste0("/scratch/aoill/projects/CAR-T/00_new_2025/soupX/demultiplexed_", i))
   
   # Need to read in batch specific empty droplet file
+  upn_id <- str_split(i, "_")[[1]][1]
+  sample_type_id <- str_split(i, "_")[[1]][2]
+  cycle_type_id <- str_split(i, "_")[[1]][3]
+  day_type_id <- str_split(i, "_")[[1]][4]
   batch_id <- str_split(i, "_")[[1]][5]
-  if ("37" %in% batch_id) {
-    batch_path <- sample_metadata_multiplexed %>% filter(Batch == 37) %>%
+  if (batch_id %in% c("37", "38", "39", "40")) {
+    batch_path <- sample_metadata_multiplexed_original %>% 
+      filter(UPN == upn_id) %>%
+      filter(Sample_Type == sample_type_id) %>%
+      filter(Cycle == cycle_type_id) %>%
+      filter(Day == day_type_id) %>%
+      filter(Batch == batch_id) %>%
       pull(CellRanger_path) %>% unique()
     d10x_tod <- Read10X(paste0(batch_path, "/outs/raw_feature_bc_matrix/"))
-  } else if ("38" %in% batch_id) {
-    batch_path <- sample_metadata_multiplexed %>% filter(Batch == 38) %>%
-      pull(CellRanger_path) %>% unique()
-    d10x_tod <- Read10X(paste0(batch_path, "/outs/raw_feature_bc_matrix/"))  
-  } else if ("39" %in% batch_id) {
-    batch_path <- sample_metadata_multiplexed %>% filter(Batch == 39) %>%
+    
+    # Run SoupX
+    sc <- SoupChannel(d10x_tod[[1]], d10x_toc, calcSoupProfile = FALSE) 
+    sc <- estimateSoup(sc)
+    toc_seu <- CreateSeuratObject(d10x_toc)
+    toc_seu <- SCTransform(toc_seu, vst.flavor = "v2")
+    toc_seu <- RunPCA(toc_seu)
+    toc_seu <- RunUMAP(toc_seu, dims = 1:15) 
+    toc_seu <- FindNeighbors(toc_seu, dims = 1:15) 
+    toc_seu <- FindClusters(toc_seu, resolution = 0.5) 
+    ## Add meta data to soupX object
+    sc <- setClusters(sc, setNames(toc_seu$seurat_clusters, rownames(toc_seu@meta.data)))
+    ## Estimate contamination (automated method)
+    message(paste0("Getting autoEstCont for: ", i))
+    print(paste0("Getting autoEstCont for: ", i))
+    sc <- autoEstCont(sc, forceAccept=TRUE) 
+    out <- adjustCounts(sc)
+    
+    # Create Seurat object using corrected data
+    d10x_seu <- CreateSeuratObject(out, assay = "SoupX_RNA")
+    d10x_seu[["RNA"]] <- toc_seu@assays[["RNA"]]
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_RNA", assay = "RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_RNA", assay = "RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_SoupX_RNA", assay = "SoupX_RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_SoupX_RNA", assay = "SoupX_RNA")
+    
+    
+  } else { # this is the new demultiplexed data
+    batch_path <- sample_metadata_multiplexed_new %>% filter(Batch == batch_id) %>%
       pull(CellRanger_path) %>% unique()
     d10x_tod <- Read10X(paste0(batch_path, "/outs/raw_feature_bc_matrix/"))
-  } else if ("40" %in% batch_id) {
-    batch_path <- sample_metadata_multiplexed %>% filter(Batch == 40) %>% 
-      pull(CellRanger_path) %>% unique()
-    d10x_tod <- Read10X(paste0(batch_path, "/outs/raw_feature_bc_matrix/"))
+    
+    # Run SoupX
+    sc <- SoupChannel(d10x_tod, d10x_toc, calcSoupProfile = FALSE) 
+    sc <- estimateSoup(sc)
+    toc_seu <- CreateSeuratObject(d10x_toc)
+    toc_seu <- SCTransform(toc_seu, vst.flavor = "v2")
+    
+    toc_seu <- RunPCA(toc_seu)
+    toc_seu <- RunUMAP(toc_seu, dims = 1:15) 
+    toc_seu <- FindNeighbors(toc_seu, dims = 1:15) 
+    toc_seu <- FindClusters(toc_seu, resolution = 0.5) 
+    ## Add meta data to soupX object
+    sc <- setClusters(sc, setNames(toc_seu$seurat_clusters, rownames(toc_seu@meta.data)))
+    ## Estimate contamination (automated method)
+    message(paste0("Getting autoEstCont for: ", i))
+    print(paste0("Getting autoEstCont for: ", i))
+    sc <- autoEstCont(sc, forceAccept=TRUE) 
+    out <- adjustCounts(sc)
+    
+    # Create Seurat object using corrected data
+    d10x_seu <- CreateSeuratObject(out, assay = "SoupX_RNA")
+    d10x_seu[["RNA"]] <- toc_seu@assays[["RNA"]]
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_RNA", assay = "RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_RNA", assay = "RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_SoupX_RNA", assay = "SoupX_RNA")
+    d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_SoupX_RNA", assay = "SoupX_RNA")
   }
-  # Run SoupX
-  sc <- SoupChannel(d10x_tod[[1]], d10x_toc, calcSoupProfile = FALSE) 
-  sc <- estimateSoup(sc)
-  toc_seu <- CreateSeuratObject(d10x_toc)
-  toc_seu <- SCTransform(toc_seu, vst.flavor = "v2")
-  toc_seu <- RunPCA(toc_seu)
-  toc_seu <- RunUMAP(toc_seu, dims = 1:15) 
-  toc_seu <- FindNeighbors(toc_seu, dims = 1:15) 
-  toc_seu <- FindClusters(toc_seu, resolution = 0.5) 
-  ## Add meta data to soupX object
-  sc <- setClusters(sc, setNames(toc_seu$seurat_clusters, rownames(toc_seu@meta.data)))
-  ## Estimate contamination (automated method)
-  message(paste0("Getting autoEstCont for: ", i))
-  print(paste0("Getting autoEstCont for: ", i))
-  sc <- autoEstCont(sc, forceAccept=TRUE) 
-  out <- adjustCounts(sc)
   
-  # Create Seurat object using corrected data
-  d10x_seu <- CreateSeuratObject(out, assay = "SoupX_RNA")
-  d10x_seu[["RNA"]] <- toc_seu@assays[["RNA"]]
-  d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_RNA", assay = "RNA")
-  d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_RNA", assay = "RNA")
-  d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^MT-", col.name = "percent.mt_SoupX_RNA", assay = "SoupX_RNA")
-  d10x_seu <- PercentageFeatureSet(d10x_seu, pattern = "^RP[SL]|^MRP[SL]", col.name = "percent.ribo_SoupX_RNA", assay = "SoupX_RNA")
+  
   
 })
 names(pbmc_seurat_list_separated_SoupX) <- sample_list
 
+
 # Add metadata
-batch_ID = "FID_GEXFB"
+#batch_ID = "FID_GEXFB"
 cellRanger_path = "CellRanger_path"
 for (i in names(pbmc_seurat_list_separated_SoupX)) {
   upn_id <- str_split(i, "_")[[1]][1]
@@ -205,6 +398,7 @@ for (i in names(pbmc_seurat_list_separated_SoupX)) {
   cycle_type_id <- str_split(i, "_")[[1]][3]
   day_type_id <- str_split(i, "_")[[1]][4]
   batch_type_id <- str_split(i, "_")[[1]][5]
+  #batch_id <- str_split(i, "_")[[1]][5]
   meta.data <- sample_metadata %>% filter(UPN == upn_id) %>% 
     filter(Sample_Type == sample_type_id) %>% 
     filter(Cycle == cycle_type_id) %>% 
@@ -240,455 +434,1037 @@ add_cell_cycle_score_2 <- function(sample_seurat_list, rna_assay = "RNA"){
   for (i in 1:length(sample_seurat_list)){
     message(names(sample_seurat_list)[i])
     DefaultAssay(sample_seurat_list[[i]]) <- rna_assay
-    sample_seurat_list[[i]] <- SCTransform(sample_seurat_list[[i]], 
-                                           vst.flavor = "v2", verbose = F)
-    DefaultAssay(sample_seurat_list[[i]]) <- "SCT"
+    sample_seurat_list[[i]] <- NormalizeData(sample_seurat_list[[i]], verbose = FALSE, assay = rna_assay)
     sample_seurat_list[[i]] <- CellCycleScoring(sample_seurat_list[[i]], s.features = s.genes, g2m.features = g2m.genes, set.ident = F) 
     DefaultAssay(sample_seurat_list[[i]]) <- rna_assay
   }
   
   return(sample_seurat_list)
 }
-
-pbmc_seurat_list_separated_SoupX <- add_cell_cycle_score_2(pbmc_seurat_list_separated_SoupX, rna_assay = "SoupX_RNA")
+seurat_list_separated_SoupX <- add_cell_cycle_score_2(seurat_list_separated_SoupX, rna_assay = "SoupX_RNA")
 
 
 #-----------------------------------------#
 ## Re-normalize with cell cycle scores ----
 #-----------------------------------------#
-for (i in 1:length(pbmc_seurat_list_separated_SoupX)) {
-  DefaultAssay(pbmc_seurat_list_separated_SoupX[[i]]) = "SoupX_RNA"
-  pbmc_seurat_list_separated_SoupX[[i]] = SCTransform(pbmc_seurat_list_separated_SoupX[[i]], 
+# I do not think I need to run this step
+for (i in 1:length(seurat_list_separated_SoupX)) {
+  DefaultAssay(seurat_list_separated_SoupX[[i]]) = "SoupX_RNA"
+  seurat_list_separated_SoupX[[i]] = SCTransform(seurat_list_separated_SoupX[[i]], 
                                                       method = "glmGamPoi", 
                                                       vars.to.regress = c("S.Score", "G2M.Score"),
                                                       vst.flavor = "v2",
-                                                      verbose = T)
+                                                      verbose = T, 
+                                                      assay = "SoupX_RNA")
 }
+
+
+#==============================================================================#
+# Run DoubletFinder by batch ----
+#==============================================================================#
+# merge and re split the object by batch instead of each unique sample (UPN,cycle,day,sample type, batch)
+seurat_list_separated_SoupX_merge <- merge(x = seurat_list_separated_SoupX[[1]], y = seurat_list_separated_SoupX[2:length(seurat_list_separated_SoupX)])
+seurat_list_separated_SoupX_batch <- Seurat::SplitObject(seurat_list_separated_SoupX_merge, split.by = "Batch")
+
+
+dblrate <- 0.15 # doublet rate
+
+for (i in 1:length(seurat_list_separated_SoupX_batch)) {
+  print(paste("Starting analysis on ",names(seurat_list_separated_SoupX_batch)[i], sep = ""))
+  # Pre-process Seurat object (sctransform)
+  DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) <- "SoupX_RNA"
+  seurat_list_separated_SoupX_batch[[i]] <- SCTransform(seurat_list_separated_SoupX_batch[[i]], 
+                                                        assay = "SoupX_RNA", 
+                                                        method = "glmGamPoi", 
+                                                        vars.to.regress = c("S.Score", "G2M.Score"),
+                                                        vst.flavor = "v2",
+                                                        verbose = F)
+  seurat_list_separated_SoupX_batch[[i]] <- RunPCA(seurat_list_separated_SoupX_batch[[i]])
+  npcs <- min(get_pcs(seurat_list_separated_SoupX_batch[[i]]))
+  seurat_list_separated_SoupX_batch[[i]] <- RunUMAP(seurat_list_separated_SoupX_batch[[i]], dims = 1:npcs)
+  seurat_list_separated_SoupX_batch[[i]] <- FindNeighbors(seurat_list_separated_SoupX_batch[[i]], dims = 1:npcs, verbose = F)
+  seurat_list_separated_SoupX_batch[[i]] <- FindClusters(seurat_list_separated_SoupX_batch[[i]], resolution = 1, verbose = F)
+  
+  
+  # pK Identification (no ground-truth) 
+  # For some reason, after running the preprocessing steps RNA and SoupX RNA 
+  # gets split, not sure why this is happening but I am joining it all here
+  # before running steps for doubletfinder
+  DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) <- "SoupX_RNA"
+  seurat_list_separated_SoupX_batch[[i]] <- JoinLayers(seurat_list_separated_SoupX_batch[[i]])
+  DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) <- "RNA"
+  seurat_list_separated_SoupX_batch[[i]] <- JoinLayers(seurat_list_separated_SoupX_batch[[i]])
+  DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) <- "SCT"
+  sweep.res.list_seu_test <- paramSweep(seurat_list_separated_SoupX_batch[[i]], PCs = 1:npcs, sct = TRUE)
+  sweep.stats_seu_test <- summarizeSweep(sweep.res.list_seu_test, GT = FALSE)
+  bcmvn_seu_test <- find.pK(sweep.stats_seu_test)
+  
+  # Select optimal pK 
+  # Optimal pK is the max of the bomodality coefficent (BCmvn) distribution
+  bcmvn.max <- bcmvn_seu_test[which.max(bcmvn_seu_test$BCmetric),]
+  optimal.pk <- bcmvn.max$pK
+  optimal.pk <- as.numeric(levels(optimal.pk))[optimal.pk]
+  
+  
+  # Homotypic Doublet Proportion Estimate 
+  homotypic.prop <- modelHomotypic(seurat_list_separated_SoupX_batch[[i]]@meta.data$seurat_clusters)
+  nExp_poi <- round(dblrate*nrow(seurat_list_separated_SoupX_batch[[i]]@meta.data))
+  nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+  
+  
+  # Run DoubletFinder
+  seurat_list_separated_SoupX_batch[[i]] <- doubletFinder(seu = seurat_list_separated_SoupX_batch[[i]], 
+                                                          PCs = 1:npcs,
+                                                          pK = optimal.pk, 
+                                                          nExp = nExp_poi, 
+                                                          sct = TRUE
+  )
+  # Run DoubletFinder again w/ pANN
+  pANN_col_pos <- ncol(seurat_list_separated_SoupX_batch[[i]]@meta.data) - 1
+  seurat_list_separated_SoupX_batch[[i]] <- doubletFinder(seu = seurat_list_separated_SoupX_batch[[i]], 
+                                                          PCs = 1:npcs, 
+                                                          pK = optimal.pk, 
+                                                          nExp = nExp_poi.adj, 
+                                                          reuse.pANN = colnames(seurat_list_separated_SoupX_batch[[i]]@meta.data)[pANN_col_pos],
+                                                          sct = TRUE
+  )
+}
+
+# Change colnames
+for (i in 1:length(seurat_list_separated_SoupX_batch)) {
+  pANN_col_pos <- ncol(seurat_list_separated_SoupX_batch[[i]]@meta.data) - 2
+  names(seurat_list_separated_SoupX_batch[[i]]@meta.data)[pANN_col_pos] <- "pANN_col"
+  names(seurat_list_separated_SoupX_batch[[i]]@meta.data)[pANN_col_pos+1] <- "DF.class_col"
+  names(seurat_list_separated_SoupX_batch[[i]]@meta.data)[pANN_col_pos+2] <- "doublet_finder"
+  
+}
+
+
+for (i in 1:length(seurat_list_separated_SoupX_batch)) {
+  DefaultAssay(seurat_list_separated_SoupX_batch[[i]]) = "SoupX_RNA"
+  seurat_list_separated_SoupX_batch[[i]] = SCTransform(seurat_list_separated_SoupX_batch[[i]], 
+                                                       assay = "SoupX_RNA", 
+                                                       method = "glmGamPoi", 
+                                                       vars.to.regress = c("S.Score", "G2M.Score"),
+                                                       vst.flavor = "v2",
+                                                       verbose = T)
+}
+
+
+# then re-merge and re-split by how I will integrate
+seurat_list_separated_SoupX_batch_merge <- merge(x = seurat_list_separated_SoupX_batch[[1]], 
+                                                 y = seurat_list_separated_SoupX_batch[2:length(seurat_list_separated_SoupX_batch)]#,
+                                                 #add.cell.ids = names(seurat_list_separated_SoupX_batch)
+)
+
+seurat_list_separated_SoupX_batch_merge@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste(
+  seurat_list_separated_SoupX_batch_merge@meta.data$UPN,
+  seurat_list_separated_SoupX_batch_merge@meta.data$Cycle, 
+  seurat_list_separated_SoupX_batch_merge@meta.data$Day, 
+  seurat_list_separated_SoupX_batch_merge@meta.data$Sample_Type, 
+  seurat_list_separated_SoupX_batch_merge@meta.data$Batch, 
+  sep = "_")
+seurat_list_separated_SoupX_batch_DoubletFinder <- Seurat::SplitObject(seurat_list_separated_SoupX_batch_merge, split.by = "UPN_Cycle_Day_Sample_Type_Batch")
 
 
 #==============================================================================#
 # Remove RB and MT genes ----
 #==============================================================================#
-# Remove ribosomal and mt genes
-pbmc_seurat_list_separated_SoupX_noRBSMT <- list()
+# No doublet finder, new cell cycle scoring
+seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT <- list()
 message("Removing ribosomal and mitochondrial genes from Seurat object")
-for (i in 1:length(pbmc_seurat_list_separated_SoupX)) {
-  RBMTgenes <- grep(pattern = "^RP[SL]|^MRP[SL]|^MT-", x = rownames(pbmc_seurat_list_separated_SoupX[[i]]@assays$RNA@data), value = TRUE, invert = TRUE)
-  pbmc_seurat_list_separated_SoupX_noRBSMT[[i]] = subset(pbmc_seurat_list_separated_SoupX[[i]], features = RBMTgenes)
+for (i in 1:length(seurat_list_separated_SoupX_batch_DoubletFinder)) {
+  RBMTgenes <- grep(pattern = "^RP[SL]|^MRP[SL]|^MT-", x = rownames(seurat_list_separated_SoupX_batch_DoubletFinder[[i]]@assays$SoupX_RNA$counts), value = TRUE, invert = TRUE)
+  seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT[[i]] = DietSeurat(seurat_list_separated_SoupX_batch_DoubletFinder[[i]], features = RBMTgenes, counts = TRUE, data = FALSE, scale.data = FALSE)
   
 }
-names(pbmc_seurat_list_separated_SoupX_noRBSMT) <- names(pbmc_seurat_list_separated_SoupX)
+names(seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT) <- names(seurat_list_separated_SoupX_batch_DoubletFinder)
 
 
 #==============================================================================#
-# Integration ----
+# Integrate ----
 #==============================================================================#
+# https://satijalab.org/seurat/articles/seurat5_integration
+pbmc_merge_rpca <- merge(x = seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT[[1]], 
+                        y = seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT[2:length(seurat_list_separated_SoupX_batch_DoubletFinder_noRBSMT)])
+
+# REMOVE DOUBLETS HERE
+pbmc_merge_rpca_singlets <- subset(pbmc_merge_rpca, subset = doublet_finder == "Singlet")
+table(pbmc_merge_rpca@meta.data$doublet_finder)
+table(pbmc_merge_rpca_singlets@meta.data$doublet_finder)
+pbmc_merge_rpca <- pbmc_merge_rpca_singlets
+
+DefaultAssay(pbmc_merge_rpca) <- "SoupX_RNA"
+pbmc_merge_rpca <- JoinLayers(pbmc_merge_rpca)
+#pbmc_merge_rpca
+
+# Split layers by RUN
+pbmc_merge_rpca[["SoupX_RNA"]] <- split(pbmc_merge_rpca[["SoupX_RNA"]], f = pbmc_merge_rpca$UPN_Cycle_Day_Sample_Type_Batch)
+#pbmc_merge_rpca
+
+
+Sys.time()
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_rpca <- SCTransform(pbmc_merge_rpca, assay = "SoupX_RNA", 
+                              vst.flavor = "v2",
+                              vars.to.regress = c("S.Score", "G2M.Score"),
+                              return.only.var.genes = FALSE,
+                              variable.features.n = 2500)
+pbmc_merge_rpca <- RunPCA(pbmc_merge_rpca)
+npcs <- min(get_pcs(pbmc_merge_rpca))
+npcs # 18 (2500)
+Sys.time()
+
+min(table(pbmc_merge_rpca$UPN_Cycle_Day_Sample_Type_Batch))
+# Integrate the layers using the SCT values
+pbmc_merge_rpca <- IntegrateLayers(object = pbmc_merge_rpca, 
+                                  method = RPCAIntegration,
+                                  assay = "SCT", # either specify here or run default assay to SCT
+                                  orig.reduction = "pca", 
+                                  new.reduction = "integrated.rpca",
+                                  verbose = FALSE,
+                                  normalization.method = "SCT", 
+                                  dims = 1:npcs,
+                                  k.weight = 50)
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_rpca <- FindNeighbors(pbmc_merge_rpca, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_rpca <- RunUMAP(pbmc_merge_rpca, dims = 1:npcs, verbose = FALSE, 
+                          reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_rpca <- FindClusters(pbmc_merge_rpca, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
 
 #------------------------------------------------------------------------------#
-## Add some more metadata ----
+## Add metadata ----
 #------------------------------------------------------------------------------#
-for (i in 1:length(pbmc_seurat_list_separated_SoupX_noRBSMT)) {
-  pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$UPN_Cycle_Day_Sample_Type_Batch <- paste0(pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$UPN, "_",
-                                                                                                    pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Cycle,  "_", 
-                                                                                                    pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Day, "_",
-                                                                                                    pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Sample_Type, "_",
-                                                                                                    pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Batch)
-  
-  pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Cycle_Day <- paste0("Cycle", pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Cycle,  "_Day", 
-                                                                              pbmc_seurat_list_separated_SoupX_noRBSMT[[i]]@meta.data$Day)
-}
+pbmc_merge_rpca@meta.data$UPN_Cycle <- paste(pbmc_merge_rpca@meta.data$UPN, pbmc_merge_rpca@meta.data$Cycle, sep = "_")
+
+
+pbmc_merge_rpca@meta.data$Response_cat <- "NA" # or any other initialization value
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "514_2"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "514_5"] <- "Non-response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "514_8"] <- "Response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "514_11"] <- "Non-response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "514_13"] <- "Non-response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "515_4"] <- "Response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "515_8"] <- "Non-response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "574_1"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "574_3"] <- "Non-response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "574_8"] <- "Non-response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "689_1"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "689_4"] <- "Response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "689_8"] <- "Response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "689_12"] <- "Non-response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "689_17"] <- "Non-response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "692_2"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "692_4"] <- "Response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "705_1"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "705_5"] <- "Non-response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "705_8"] <- "Non-response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "716_2"] <- "Baseline"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "716_4"] <- "Response"
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "716_8"] <- "Response"
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "625_3"] <- "Non-response" 
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "625_4"] <- "Non-response" 
+
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "626_4"] <- "Response" 
+pbmc_merge_rpca@meta.data$Response_cat[pbmc_merge_rpca@meta.data$UPN_Cycle == "626_7"] <- "Non-response" 
+
+table(pbmc_merge_rpca@meta.data$Response_cat)
+
+
+# add disease info
+pbmc_merge_rpca@meta.data$tumor_type <- NA # or any other initialization value
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "514"] <- "Ependymoma"
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "574"] <- "Ependymoma"
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "625"] <- "Ependymoma" 
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "689"] <- "Ependymoma"
+
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "515"] <- "DMG"
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "626"] <- "DMG" 
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "692"] <- "DMG"
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "716"] <- "DMG"
+
+pbmc_merge_rpca@meta.data$tumor_type[pbmc_merge_rpca@meta.data$UPN == "705"] <- "Glioblastoma"
+
+
+# Add lymphodepletion status
+unique(pbmc_merge_rpca@meta.data$UPN)
+#[1] 514 574 515 626 625 705 689 716 692
+
+pbmc_merge_rpca@meta.data$Lymphodepletion <- NA # or any other initialization value
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "625"] <- "Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "626"] <- "Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "689"] <- "Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "705"] <- "Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "716"] <- "Lymphodepleted" 
+pbmc_merge_rpca@meta.data$Lymphodepletion[pbmc_merge_rpca@meta.data$UPN == "692"] <- "Lymphodepleted" 
 
 
 
 #------------------------------------------------------------------------------#
-## Integrate PBMCs ----
+## Sub-cluster ----
 #------------------------------------------------------------------------------#
-pbmc_seurat_list <- pbmc_seurat_list_separated_SoupX_noRBSMT
+# Cluster 6
+# Some erthrocyte, some lymphoid
+Idents(pbmc_merge_rpca) <- "SCT_snn_res.0.2"
+pbmc_merge_sub <- FindSubCluster(pbmc_merge_rpca, "6", resolution = 0.2, graph.name = "SCT_snn")
 
-pbmc_seurat_list <- lapply(pbmc_seurat_list, function(xx){
-  # Rerunning SCTransform
-  DefaultAssay(xx) <- "SoupX_RNA"
-  xx <- SCTransform(xx, 
-                    method = "glmGamPoi",
-                    vars.to.regress = c("S.Score", "G2M.Score"), 
-                    vst.flavor = "v2",
-                    verbose = T)
-  
-})
 
-pbmc_integrated <- basic_sct_rpca_integration(pbmc_seurat_list, npcs=50, k_weight=100, numfeatures = 2500)
+# Lym/Mye integration ----
+#Lymphoid: 3, 4, 6_5 , 6_6, 7, 8, 10
+#Myeloid: 0, 1, 2, 5, 9, 12
+
 
 
 #==============================================================================#
-# T cell integration ----
+# Integrate Lymphoid, pass 1 ----
 #==============================================================================#
-#------------------------------------------------------------------------------#
-## Subset potential T cell clusters and re-integrate ----
-#------------------------------------------------------------------------------#
-# potential T cell clusters
-potential_T_clusters <- c("1", "2", "3", "5", "6", "7", "13", "14")
-
-# we are using resolution 0.2 
-Idents(pbmc_integrated) <- "integrated_sct_snn_res.0.2"
+# pbmc_merge_sub
+lymphoid <- c("3", "4", "6_5", "6_6", "7", "8", "10")
+# we are using sub.cluster 
+Idents(pbmc_merge_sub) <- "sub.cluster"
 # get number of cells in each cluster
-table(Idents(pbmc_integrated))
-# Get cell names from the clusters that I think are T cells
-integrated_obj_potential_T_clusters <- subset(pbmc_integrated, idents = potential_T_clusters)
-table(integrated_obj_potential_T_clusters@meta.data$integrated_sct_snn_res.0.2)
+table(Idents(pbmc_merge_sub))
+#6_1    10     7    12     4     3   6_0     2     9     8     5   6_4     1     0    11   6_2   6_6   6_5   6_3 
+#3569  3886 10157  2475 14068 15474  3928 17274  6101  7268 12187   880 22652 38536  2546  1407   215   704  1289 
+
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_sub_lym <- subset(pbmc_merge_sub, idents = lymphoid)
+table(pbmc_merge_sub_lym@meta.data$sub.cluster)
+#10     3     4   6_5   6_6     7     8 
+#3886 15474 14068   704   215 10157  7268 
 
 # Drop levels
-integrated_obj_potential_T_clusters@meta.data[["integrated_sct_snn_res.0.2"]] <- droplevels(integrated_obj_potential_T_clusters@meta.data[["integrated_sct_snn_res.0.2"]])
+pbmc_merge_sub_lym@meta.data[["sub.cluster"]] <- as.factor(pbmc_merge_sub_lym@meta.data[["sub.cluster"]])
+pbmc_merge_sub_lym@meta.data[["sub.cluster"]] <- droplevels(pbmc_merge_sub_lym@meta.data[["sub.cluster"]])
 
-# Split object by FID_GEXFB, since this is how they were split originally 
-integrated_obj_potential_T_clusters_batches_list <- SplitObject(integrated_obj_potential_T_clusters, split.by = "FID_GEXFB")
+DefaultAssay(pbmc_merge_sub_lym) <- "SoupX_RNA"
+pbmc_merge_sub_lym <- JoinLayers(pbmc_merge_sub_lym)
+pbmc_merge_sub_lym
 
-# Re-run SCTransform
-integrated_obj_potential_T_clusters_batches_list <- lapply(integrated_obj_potential_T_clusters_batches_list, function(xx){
-  # Rerunning SCTransform
-  DefaultAssay(xx) <- "SoupX_RNA"
-  xx <- SCTransform(xx, 
-                    method = "glmGamPoi",
-                    vars.to.regress = c("S.Score", "G2M.Score"), 
-                    vst.flavor = "v2",
-                    verbose = T)
-  
-})
+# Split layers by RUN
+pbmc_merge_sub_lym[["SoupX_RNA"]] <- split(pbmc_merge_sub_lym[["SoupX_RNA"]], f = pbmc_merge_sub_lym$UPN_Cycle_Day_Sample_Type_Batch)
+pbmc_merge_sub_lym
 
 
-# Integrate
-potential_T_clusters_integrated_obj <- basic_sct_rpca_integration(integrated_obj_potential_T_clusters_batches_list, npcs=50, k_weight=100, numfeatures = 2500)
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_sub_lym <- SCTransform(pbmc_merge_sub_lym, assay = "SoupX_RNA", 
+                                  vst.flavor = "v2",
+                                  vars.to.regress = c("S.Score", "G2M.Score"),
+                                  return.only.var.genes = FALSE,
+                                  variable.features.n = 2500)
+
+pbmc_merge_sub_lym <- RunPCA(pbmc_merge_sub_lym)
+npcs <- min(get_pcs(pbmc_merge_sub_lym))
+npcs # 13 (2500)
+Sys.time()
+
+
+min(table(pbmc_merge_sub_lym$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 68
+
+# Integrate the layers using the SCT values
+pbmc_merge_sub_lym <- IntegrateLayers(object = pbmc_merge_sub_lym, 
+                                      method = RPCAIntegration,
+                                      assay = "SCT", # either specify here or run default assay to SCT
+                                      orig.reduction = "pca", 
+                                      new.reduction = "integrated.rpca",
+                                      verbose = FALSE,
+                                      normalization.method = "SCT", 
+                                      dims = 1:npcs,
+                                      k.weight = 45
+)
+
+# Error: k.weight (100) is set larger than the number of cells in the smallest object (60). Please choose a smaller k.weight.
+
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_sub_lym <- FindNeighbors(pbmc_merge_sub_lym, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_sub_lym <- RunUMAP(pbmc_merge_sub_lym, dims = 1:npcs, verbose = FALSE, 
+                              reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_sub_lym <- FindClusters(pbmc_merge_sub_lym, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
 
 #------------------------------------------------------------------------------#
-### Subset T cells and re-cluster ----
+## Sub-cluster ----
 #------------------------------------------------------------------------------#
-Idents(potential_T_clusters_integrated_obj) <- "integrated_sct_snn_res.0.5"
-T_only_clusters <- c("2", "3", "4", "6", "7", "8", "9", "12", "13")
-T_only_obj <- subset(potential_T_clusters_integrated_obj, idents = T_only_clusters)
+# Cluster 5
+Idents(pbmc_merge_sub_lym) <- "SCT_snn_res.0.2"
+pbmc_merge_sub_lym_sub <- FindSubCluster(pbmc_merge_sub_lym, "5", resolution = 0.15, graph.name = "SCT_snn")
 
 
-# Re-cluster
-npcs <- min(get_pcs(T_only_obj, reduction_name = "integrated_sct_pca"))
-npcs
-integrated_object_T_only <- RunUMAP(T_only_obj,
-                                    reduction = "integrated_sct_pca",
-                                    reduction.name = "integrated_sct_umap",
-                                    dims = 1:npcs,
-                                    return.model = TRUE)
-integrated_object_T_only <- FindNeighbors(integrated_object_T_only,
-                                          reduction = "integrated_sct_pca",
-                                          dims = 1:npcs,
-                                          graph.name = c("integrated_sct_nn",
-                                                         "integrated_sct_snn"))
-integrated_object_T_only <- FindClusters(integrated_object_T_only,
-                                         resolution = c(0.1,0.2,0.3,0.5,0.8,1),
-                                         graph.name = "integrated_sct_snn")
+#Lymphoid: 0, 1, 2, 3, 5_2, 5_3, 6
+#Myeloid: 5_4
+#Doublets/low quality: 4, 5_0, 5_1, 5_5
 
 
 #==============================================================================#
-# Add metadata ----
+# Integrate Myeloid, pass 1 ----
 #==============================================================================#
+# Myeloid with 5_4 from lymphoid pass 1 object
+# pbmc_merge_sub_lym sub.cluster
+# Myeliod clusters from full object pbmc_merge_sub
+myeloid <- c("0", "1", "2", "5", "9", "12")
+pbmc_merge_sub@meta.data$cell_ID <- rownames(pbmc_merge_sub@meta.data)
+myeloid_IDs_full_obj <- pbmc_merge_sub@meta.data %>% filter(sub.cluster %in% myeloid) %>% 
+  dplyr::pull(cell_ID) 
+
+# Get cell IDs from lymphoid pass 1 object
+# pbmc_merge_sub_lym_sub sub.cluster 5_4
+pbmc_merge_sub_lym_sub@meta.data$cell_ID <- rownames(pbmc_merge_sub_lym_sub@meta.data)
+myeloid_IDs_lym_obj <- pbmc_merge_sub_lym_sub@meta.data %>% filter(sub.cluster %in% c("5_4")) %>% 
+  dplyr::pull(cell_ID) 
+
+myeloid_IDs_all <- c(myeloid_IDs_full_obj, myeloid_IDs_lym_obj)
+length(myeloid_IDs_all)
+# 99514
+# Get cell names from the clusters that I think are myeloid cells
+pbmc_merge_sub_mye <- subset(pbmc_merge_sub, subset = cell_ID %in% myeloid_IDs_all)
+nrow(pbmc_merge_sub_mye@meta.data)
+# 99514
+
+DefaultAssay(pbmc_merge_sub_mye) <- "SoupX_RNA"
+pbmc_merge_sub_mye <- JoinLayers(pbmc_merge_sub_mye)
+#pbmc_merge_sub_mye
+
+# Split layers by RUN
+pbmc_merge_sub_mye[["SoupX_RNA"]] <- split(pbmc_merge_sub_mye[["SoupX_RNA"]], f = pbmc_merge_sub_mye$UPN_Cycle_Day_Sample_Type_Batch)
+#pbmc_merge_sub_mye
+
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_sub_mye <- SCTransform(pbmc_merge_sub_mye, assay = "SoupX_RNA", 
+                                  vst.flavor = "v2",
+                                  vars.to.regress = c("S.Score", "G2M.Score"),
+                                  return.only.var.genes = FALSE,
+                                  variable.features.n = 2500)
+
+pbmc_merge_sub_mye <- RunPCA(pbmc_merge_sub_mye)
+npcs <- min(get_pcs(pbmc_merge_sub_mye))
+npcs # 15 (2500)
+Sys.time()
+
+min(table(pbmc_merge_sub_mye$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 32
+
+# Integrate the layers using the SCT values
+pbmc_merge_sub_mye <- IntegrateLayers(object = pbmc_merge_sub_mye, 
+                                      method = RPCAIntegration,
+                                      assay = "SCT", # either specify here or run default assay to SCT
+                                      orig.reduction = "pca", 
+                                      new.reduction = "integrated.rpca",
+                                      verbose = FALSE,
+                                      normalization.method = "SCT", 
+                                      dims = 1:npcs,
+                                      k.weight = 25
+)
+
+# Error: k.weight (100) is set larger than the number of cells in the smallest object (60). Please choose a smaller k.weight.
+
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_sub_mye <- FindNeighbors(pbmc_merge_sub_mye, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_sub_mye <- RunUMAP(pbmc_merge_sub_mye, dims = 1:npcs, verbose = FALSE, 
+                              reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_sub_mye <- FindClusters(pbmc_merge_sub_mye, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
+# clust 6 looks like T cells 
+
+
+#==============================================================================#
+# Integrate Lymphoid, pass 2 ----
+#==============================================================================#
+# Lymphoid pass 2: Add cluster 6 from pass 1 myeloid object and re-integrate
+# Get cell IDs from lymphoid pass 1 object
+# pbmc_merge_sub_lym_sub sub.cluster 5_4
+pbmc_merge_sub_lym_sub@meta.data$cell_ID <- rownames(pbmc_merge_sub_lym_sub@meta.data)
+lymphoid_IDs_lym_obj <- pbmc_merge_sub_lym_sub@meta.data %>% 
+  filter(sub.cluster %in% c("0", "1", "2", "3", "5_2", "5_3", "6")) %>% 
+  dplyr::pull(cell_ID) 
+length(lymphoid_IDs_lym_obj)
+# 43390
+
+pbmc_merge_sub_mye@meta.data$cell_ID <- rownames(pbmc_merge_sub_mye@meta.data)
+lymphoid_IDs_mye_obj <- pbmc_merge_sub_mye@meta.data %>% 
+  filter(SCT_snn_res.0.2 %in% c("6")) %>% 
+  dplyr::pull(cell_ID) 
+length(lymphoid_IDs_mye_obj)
+# 152
+
+# Get cell IDs from myeloid pass 1 object
+lymphoid_IDs_all <- c(lymphoid_IDs_lym_obj, lymphoid_IDs_mye_obj)
+length(lymphoid_IDs_all)
+# 43542
+# Get cell names from the clusters that I think are myeloid cells
+pbmc_merge_sub_lym_pass2 <- subset(pbmc_merge_sub, subset = cell_ID %in% lymphoid_IDs_all)
+nrow(pbmc_merge_sub_lym_pass2@meta.data)
+# 43542
+
+DefaultAssay(pbmc_merge_sub_lym_pass2) <- "SoupX_RNA"
+pbmc_merge_sub_lym_pass2 <- JoinLayers(pbmc_merge_sub_lym_pass2)
+#pbmc_merge_sub_lym_pass2
+
+# Split layers by RUN
+pbmc_merge_sub_lym_pass2[["SoupX_RNA"]] <- split(pbmc_merge_sub_lym_pass2[["SoupX_RNA"]], f = pbmc_merge_sub_lym_pass2$UPN_Cycle_Day_Sample_Type_Batch)
+
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_sub_lym_pass2 <- SCTransform(pbmc_merge_sub_lym_pass2, assay = "SoupX_RNA", 
+                                        vst.flavor = "v2",
+                                        vars.to.regress = c("S.Score", "G2M.Score"),
+                                        return.only.var.genes = FALSE,
+                                        variable.features.n = 2500)
+
+pbmc_merge_sub_lym_pass2 <- RunPCA(pbmc_merge_sub_lym_pass2)
+npcs <- min(get_pcs(pbmc_merge_sub_lym_pass2))
+npcs # 15 (2500)
+Sys.time()
+
+
+min(table(pbmc_merge_sub_lym_pass2$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 44
+
+# Integrate the layers using the SCT values
+pbmc_merge_sub_lym_pass2 <- IntegrateLayers(object = pbmc_merge_sub_lym_pass2, 
+                                            method = RPCAIntegration,
+                                            assay = "SCT", # either specify here or run default assay to SCT
+                                            orig.reduction = "pca", 
+                                            new.reduction = "integrated.rpca",
+                                            verbose = FALSE,
+                                            normalization.method = "SCT", 
+                                            dims = 1:npcs,
+                                            k.weight = 35
+)
+
+# Error: k.weight (100) is set larger than the number of cells in the smallest object (60). Please choose a smaller k.weight.
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_sub_lym_pass2 <- FindNeighbors(pbmc_merge_sub_lym_pass2, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_sub_lym_pass2 <- RunUMAP(pbmc_merge_sub_lym_pass2, dims = 1:npcs, verbose = FALSE, 
+                                    reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_sub_lym_pass2 <- FindClusters(pbmc_merge_sub_lym_pass2, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
+
 
 #------------------------------------------------------------------------------#
-## T cell object ----
+## Sub-cluster ----
 #------------------------------------------------------------------------------#
+# remove cluster 6 and re-integrate 
+# Cluster 4
+Idents(pbmc_merge_sub_lym_pass2) <- "SCT_snn_res.0.2"
+pbmc_merge_sub_lym_pass2_sub <- FindSubCluster(pbmc_merge_sub_lym_pass2, "4", resolution = 0.2, graph.name = "SCT_snn")
 
-#------------------------------------------------------------------------------#
-### Add response information T cell object ----
-#------------------------------------------------------------------------------#
-integrated_object_T_only@meta.data$UPN_Cycle <- paste(integrated_object_T_only@meta.data$UPN, integrated_object_T_only@meta.data$Cycle, sep = "_")
-levels(as.factor(integrated_object_T_only@meta.data$UPN_Cycle))
-
-integrated_object_T_only@meta.data$ResponseNon <- NA # or any other initialization value
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "514_5"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "514_8"] <- "Response"
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "515_4"] <- "Response"
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "574_8"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "514_11"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "515_8"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "574_3"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "625_1"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "625_3"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "625_4"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "626_1"] <- "Non-Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-integrated_object_T_only@meta.data$ResponseNon[integrated_object_T_only@meta.data$UPN_Cycle == "626_7"] <- "Non-Response" 
-
-integrated_object_T_only@meta.data$Responses <- NA # or any other initialization value
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "514_5"] <- "Stable" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "514_8"] <- "Response"
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "515_4"] <- "Response"
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "574_8"] <- "Stable"
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "514_11"] <- "Progression"
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "515_8"] <- "Progression"
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "574_3"] <- "Pseudoprogression" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "625_3"] <- "Progression" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "625_4"] <- "Progression" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-integrated_object_T_only@meta.data$Responses[integrated_object_T_only@meta.data$UPN_Cycle == "626_7"] <- "Progression" 
-
-table(integrated_object_T_only@meta.data$ResponseNon)
-table(integrated_object_T_only@meta.data$Responses)
+#4_0: B cells
+#4_1: doublet
+#4_2: pDC
+#4_3: doublet
 
 
-#------------------------------------------------------------------------------#
-### Add lymphodepletion information T cell object ----
-#------------------------------------------------------------------------------#
-integrated_object_T_only@meta.data$Lymphodepletion <- NA # or any other initialization value
-integrated_object_T_only@meta.data$Lymphodepletion[integrated_object_T_only@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
-integrated_object_T_only@meta.data$Lymphodepletion[integrated_object_T_only@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
-integrated_object_T_only@meta.data$Lymphodepletion[integrated_object_T_only@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
-integrated_object_T_only@meta.data$Lymphodepletion[integrated_object_T_only@meta.data$UPN == "625"] <- "Lymphodepleted" 
-integrated_object_T_only@meta.data$Lymphodepletion[integrated_object_T_only@meta.data$UPN == "626"] <- "Lymphodepleted" 
+#==============================================================================#
+# Integrate Lymphoid, pass 3 ----
+#==============================================================================#
+# Lymphoid pass 3, remove doublet clusters 
+# pbmc_merge_sub_lym_pass2_sub
+#4_0: B cells
+#4_1: doublet
+#4_2: pDC
+#4_3: doublet
+lymphoid_pass3 <- c("0", "1", "2", "3", "4_0", "4_2", "5")
+# we are using sub.cluster 
+Idents(pbmc_merge_sub_lym_pass2_sub) <- "sub.cluster"
+# get number of cells in each cluster
+table(Idents(pbmc_merge_sub_lym_pass2_sub))
+#4_0     0     2   4_1     3     1     6     5   4_2   4_3 
+#2634 11807  9116   465  7075 10110   573  1088   415   259 
 
-table(integrated_object_T_only@meta.data$Lymphodepletion)
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_lym_pass3 <- subset(pbmc_merge_sub_lym_pass2_sub, idents = lymphoid_pass3)
+table(pbmc_merge_lym_pass3@meta.data$sub.cluster)
+#0     1     2     3   4_0   4_2     5 
+#11807 10110  9116  7075  2634   415  1088 
 
+# Drop levels
+pbmc_merge_lym_pass3@meta.data[["sub.cluster"]] <- as.factor(pbmc_merge_lym_pass3@meta.data[["sub.cluster"]])
+pbmc_merge_lym_pass3@meta.data[["sub.cluster"]] <- droplevels(pbmc_merge_lym_pass3@meta.data[["sub.cluster"]])
 
-#------------------------------------------------------------------------------#
-### Add T cell state annotations to T cell object ----
-#------------------------------------------------------------------------------#
-#### Sub-cluster ----
+DefaultAssay(pbmc_merge_lym_pass3) <- "SoupX_RNA"
+pbmc_merge_lym_pass3 <- JoinLayers(pbmc_merge_lym_pass3)
+#pbmc_merge_lym_pass3
 
-# Sub-cluster 1
-Idents(integrated_object_T_only) <- "integrated_sct_snn_res.0.2"
-integrated_object_T_only_subcluster_1 <- FindSubCluster(integrated_object_T_only, "1", resolution = 0.2, graph.name = "integrated_sct_snn")
-
-# Sub-cluster 2
-Idents(integrated_object_T_only_subcluster_1) <- "sub.cluster"
-integrated_object_T_only_subcluster_1_2 <- FindSubCluster(integrated_object_T_only_subcluster_1, "2", resolution = 0.2, graph.name = "integrated_sct_snn")
-
-
-# Sub-cluster 3
-Idents(integrated_object_T_only_subcluster_1_2) <- "sub.cluster"
-integrated_object_T_only_subcluster_1_2_3 <- FindSubCluster(integrated_object_T_only_subcluster_1_2, "3", resolution = 0.1, graph.name = "integrated_sct_snn")
-
-# Sub-cluster 0
-# Cluster 0_2 has plasma marker expression (CD79A and MZB1). So remove this
-# cluster and at the end re-cluster
-Idents(integrated_object_T_only_subcluster_1_2_3) <- "sub.cluster"
-integrated_object_T_only_subcluster_1_2_3_0 <- FindSubCluster(integrated_object_T_only_subcluster_1_2_3, "0", resolution = 0.1, graph.name = "integrated_sct_snn")
-
-# Remove plasma cluster (0_2)
-Idents(integrated_object_T_only_subcluster_1_2_3_0) <- "sub.cluster"
-integrated_object_T_only_subcluster_1_2_3_0_sub <- subset(integrated_object_T_only_subcluster_1_2_3_0, subset = sub.cluster != "0_2")
-
-# Re-UMAP
-npcs <- min(get_pcs(integrated_object_T_only_subcluster_1_2_3_0_sub, reduction_name = "integrated_sct_pca"))
-npcs
-
-obj_T_fltr_rclstr_sbclstr_fnl <- RunUMAP(integrated_object_T_only_subcluster_1_2_3_0_sub,
-                                              reduction = "integrated_sct_pca",
-                                              reduction.name = "integrated_sct_umap",
-                                              dims = 1:npcs,
-                                              return.model = TRUE)
+# Split layers by RUN
+pbmc_merge_lym_pass3[["SoupX_RNA"]] <- split(pbmc_merge_lym_pass3[["SoupX_RNA"]], f = pbmc_merge_lym_pass3$UPN_Cycle_Day_Sample_Type_Batch)
+#pbmc_merge_lym_pass3
 
 
-#DimPlot(obj_T_fltr_rclstr_sbclstr_fnl, group.by = "sub.cluster", reduction = "integrated_sct_umap", label = T) 
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_lym_pass3 <- SCTransform(pbmc_merge_lym_pass3, assay = "SoupX_RNA", 
+                                    vst.flavor = "v2",
+                                    vars.to.regress = c("S.Score", "G2M.Score"),
+                                    return.only.var.genes = FALSE,
+                                    variable.features.n = 2500)
+
+pbmc_merge_lym_pass3 <- RunPCA(pbmc_merge_lym_pass3)
+npcs <- min(get_pcs(pbmc_merge_lym_pass3))
+npcs # 14 (2500)
+Sys.time()
 
 
-#### Add cell state annotations ----
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states <- obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster
+min(table(pbmc_merge_lym_pass3$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 42
 
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("1_0", "3_0", "4")] <- "CD8 Effector"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("1_1", "5")] <- "CD8 Effector Memory"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("0_0", "0_1")] <- "CD4 Memory"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("2_1")] <- "CD4 Naive"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("2_0", "3_1")] <- "CD8 Naive"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("6")] <- "CD8 Activated"
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$ct_T_states[
-  obj_T_fltr_rclstr_sbclstr_fnl@meta.data$sub.cluster %in% c("7")] <- "CD8 Proliferating"
-
-#DimPlot(obj_T_fltr_rclstr_sbclstr_fnl, group.by = "ct_T_states", label = T)
-
-
-#------------------------------------------------------------------------------#
-### Add CAR-T info to T cell object ----
-#------------------------------------------------------------------------------#
-DefaultAssay(obj_T_fltr_rclstr_sbclstr_fnl) <- "RNA"
-
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$IL13OPCounts <- obj_T_fltr_rclstr_sbclstr_fnl@assays$RNA@counts["IL13OP",]
-obj_T_fltr_rclstr_sbclstr_fnl@meta.data$CART <- ifelse(
-  (obj_T_fltr_rclstr_sbclstr_fnl@meta.data$IL13OPCounts >= 3 & (obj_T_fltr_rclstr_sbclstr_fnl@meta.data$CT == "CD8+ T" | obj_T_fltr_rclstr_sbclstr_fnl@meta.data$CT == "CD4+ T" | obj_T_fltr_rclstr_sbclstr_fnl@meta.data$CT == "Treg" )), "Positive", "Negative")
-
-table(obj_T_fltr_rclstr_sbclstr_fnl@meta.data$CART)
-
-
-#------------------------------------------------------------------------------#
-### Add TCR data to T cell object ----
-#------------------------------------------------------------------------------#
-#### Add TCR data determined from scRepertoire ----
-
-##### Load the contig data ----
-## PBMC and Product
-# This data is multiplexed so I will have to use a function in 
-# scRepetiore to create the list for each sample (patient/cycle/day combinations)
-
-# Batch 37
-F05037 <- read.csv("/tgen_labs/banovich/SingleCell/CellRanger/5_0_0/Ensemble_98/PipelineData/Projects/BCTCSF/CellRangerOuts/VDJ/BCTCSF_0103_1_PB_Whole_C1_X5TCR_F05037_HVFC5DSX3/outs/filtered_contig_annotations.csv")
-
-# Batch 38
-F05041 <- read.csv("/tgen_labs/banovich/SingleCell/CellRanger/5_0_0/Ensemble_98/PipelineData/Projects/BCTCSF/CellRangerOuts/VDJ/BCTCSF_0105_1_PB_Whole_C1_X5TCR_F05041_HVFC5DSX3/outs/filtered_contig_annotations.csv")
-
-# Batch 39
-F05625 <- read.csv("/tgen_labs/banovich/SingleCell/CellRanger/5_0_0/Ensemble_98/PipelineData/Projects/BCTCSF/CellRangerOuts/VDJ/BCTCSF_0114_1_PB_Whole_C1_X5TCR_F05625_HNJG2DSX5/outs/filtered_contig_annotations.csv")
-
-# Batch 40
-F05626 <- read.csv("/tgen_labs/banovich/SingleCell/CellRanger/5_0_0/Ensemble_98/PipelineData/Projects/BCTCSF/CellRangerOuts/VDJ/BCTCSF_0117_1_PB_Whole_C1_X5TCR_F05626_HNJG2DSX5/outs/filtered_contig_annotations.csv")
-
-
-##### Process the contig data ----
-
-# Split by batch
-seurat_obj <- obj_T_fltr_rclstr_sbclstr_fnl
-
-seurat_list <- SplitObject(seurat_obj, split.by = "Batch")
-
-# Strip the barcode extra labeling in seurat_list since the imported contig's 
-# cell IDs are not formatted with a prefix (like Batch37_BARCODEID)
-seurat_list_cells_renamed <- list()
-for (i in names(seurat_list)){
-  print(i)
-  new_cell_IDs_tmp <- t(as.data.frame(str_split(rownames(seurat_list[[i]]@meta.data), "_")))
-  new_cell_IDs <-  as.character(new_cell_IDs_tmp[,2])
-  renamed_assay <- RenameCells(
-    seurat_list[[i]],
-    new.names = new_cell_IDs
-  )
-  seurat_list_cells_renamed <- c(seurat_list_cells_renamed, renamed_assay)
-}
-names(seurat_list_cells_renamed) <- names(seurat_list)
-
-# Get the contig list for the multiplexed batches
-contig_list_37 <- createHTOContigList(F05037, seurat_list_cells_renamed[["37"]], group.by = c("TCRseq_ID", "UPN", "Cycle", "Day", "Sample_Type"))
-contig_list_38 <- createHTOContigList(F05041, seurat_list_cells_renamed[["38"]], group.by = c("TCRseq_ID", "UPN", "Cycle", "Day", "Sample_Type"))
-contig_list_39 <- createHTOContigList(F05625, seurat_list_cells_renamed[["39"]], group.by = c("TCRseq_ID", "UPN", "Cycle", "Day", "Sample_Type"))
-contig_list_40 <- createHTOContigList(F05626, seurat_list_cells_renamed[["40"]], group.by = c("TCRseq_ID", "UPN", "Cycle", "Day", "Sample_Type"))
-
-# Merge all contigs and contig lists into one contig list
-contig_list_pbmc <- append(contig_list_37, contig_list_38)
-contig_list_pbmc <- append(contig_list_pbmc, contig_list_39)
-contig_list_pbmc <- append(contig_list_pbmc, contig_list_40)
-
-names(contig_list_pbmc)
-# [1] "F05037.514.8.1.PBMC"  "F05037.514.5.1.PBMC"  "F05037.574.3.1.PBMC"  "F05037.515.8.1.PBMC"  "F05041.514.11.1.PBMC" "F05041.515. 4.2.PBMC"
-# [7] "F05041.574. 8.1.PBMC" "F05625.626.1.0.PBMC"  "F05625.625.3.1.PBMC"  "F05625.626.4.1.PBMC"  "F05626.626.7.1.PBMC"  "F05626.625.4.1.PBMC" 
-# [13] "F05626.625.1.0.PBMC" 
-
-names(contig_list_pbmc) <- c("F05037_514_8_1_PBMC", "F05037_514_5_1_PBMC", 
-                             "F05037_574_3_1_PBMC", "F05037_515_8_1_PBMC", 
-                             "F05041_514_11_1_PBMC", "F05041_515_4_2_PBMC",
-                             "F05041_574_8_1_PBMC", "F05625_626_1_0_PBMC", 
-                             "F05625_625_3_1_PBMC", "F05625_626_4_1_PBMC", 
-                             "F05626_626_7_1_PBMC", "F05626_625_4_1_PBMC", 
-                             "F05626_625_1_0_PBMC")
-
-##### Combine the contigs ----
-
-# Will want to use the parameter removeNA set to true to remove any cell barcode 
-# with an NA value in at least one of the chains
-combined <- combineTCR(contig_list_pbmc, 
-                       samples =  c("F05037_514_8_1_PBMC", "F05037_514_5_1_PBMC", 
-                                    "F05037_574_3_1_PBMC", "F05037_515_8_1_PBMC", 
-                                    "F05041_514_11_1_PBMC", "F05041_515_4_2_PBMC",
-                                    "F05041_574_8_1_PBMC", "F05625_626_1_0_PBMC", 
-                                    "F05625_625_3_1_PBMC", "F05625_626_4_1_PBMC", 
-                                    "F05626_626_7_1_PBMC", "F05626_625_4_1_PBMC", 
-                                    "F05626_625_1_0_PBMC"),
-                       cells ="T-AB", filterMulti = FALSE, removeNA = TRUE
+# Integrate the layers using the SCT values
+pbmc_merge_lym_pass3 <- IntegrateLayers(object = pbmc_merge_lym_pass3, 
+                                        method = RPCAIntegration,
+                                        assay = "SCT", # either specify here or run default assay to SCT
+                                        orig.reduction = "pca", 
+                                        new.reduction = "integrated.rpca",
+                                        verbose = FALSE,
+                                        normalization.method = "SCT", 
+                                        dims = 1:npcs,
+                                        k.weight = 35
 )
 
 
-##### Add TCR info to the Seurat objects ----
 
-### Add a new barcode column in the TCR list to match the Seurat objects
-# I need to replace the barcode column in combined which matching barcode to 
-# seurat object 
-# Path to google sheet with metadata for your samples
-metapath <- "https://docs.google.com/spreadsheets/d/1fmEuOFXm893mfS2T1zpEsMrN7MpFc_Aym24ZODbw2bA/edit#gid=0"
-sheet_name <- "Sheet1"
-sample_metadata <- load_metadata(metadata_path = metapath, data_type = "googlesheet", sheet_name = sheet_name)
-
-# I think it will do the frequency correctly if I add the following information 
-# as columns to all entries in this list: UPN, Cycle, Day, Sample_Type,
-# UPN_Cycle_Day, UPN_Cycle_Day_Sample_Type
-combined2 <- lapply(names(combined), function(i){
-  j <- combined[[i]]
-  k <- unique(j$sample)
-  l <- strsplit(k, "_")[[1]][1] # this is the TCRseq_ID in my metadata file
-  # add new barcode column
-  # also make an original barcode column (without anything in front of barcode)
-  j$tcr_barcode <- j$barcode
-  j$orig_barcode <- sapply(strsplit(j$barcode, "_"), `[`, 6) # position in the string where the original barcode starts
-  cell_id_prefix <- sample_metadata %>% filter(TCRseq_ID == l) %>% pull(Cell_Prefix) %>% unique()
-  j$barcode <- paste0(cell_id_prefix, "_", j$orig_barcode)
-  j$TCR_ID <- sapply(strsplit(j$sample, "_"), `[`, 1)
-  j$UPN <- sapply(strsplit(j$sample, "_"), `[`, 2)
-  j$Cycle <- sapply(strsplit(j$sample, "_"), `[`, 3)
-  j$Day <- sapply(strsplit(j$sample, "_"), `[`, 4)
-  j$Sample_Type <- sapply(strsplit(j$sample, "_"), `[`, 5)
-  j$UPN_Cycle_Day_Sample_Type <- paste(j$UPN, j$Cycle, j$Day, j$Sample_Type, sep = "_")
-  j$TCR_ID_UPN_Cycle_Day_Sample_Type <- paste(j$TCR_ID, j$UPN, j$Cycle, j$Day, j$Sample_Type, sep = "_")
-  j
-})
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_lym_pass3 <- FindNeighbors(pbmc_merge_lym_pass3, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_lym_pass3 <- RunUMAP(pbmc_merge_lym_pass3, dims = 1:npcs, verbose = FALSE, 
+                                reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_lym_pass3 <- FindClusters(pbmc_merge_lym_pass3, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
 
 
-names(combined2) <- c("F05037_514_8_1_PBMC", "F05037_514_5_1_PBMC", 
-                      "F05037_574_3_1_PBMC", "F05037_515_8_1_PBMC", 
-                      "F05041_514_11_1_PBMC", "F05041_515_4_2_PBMC",
-                      "F05041_574_8_1_PBMC", "F05625_626_1_0_PBMC", 
-                      "F05625_625_3_1_PBMC", "F05625_626_4_1_PBMC", 
-                      "F05626_626_7_1_PBMC", "F05626_625_4_1_PBMC", 
-                      "F05626_625_1_0_PBMC")
+#------------------------------------------------------------------------------#
+## Sub-cluster ----
+#------------------------------------------------------------------------------#
+# Cluster 5
+# subcluster 5 to separate pDCs from b cells 
+Idents(pbmc_merge_lym_pass3_5) <- "SCT_snn_res.0.2"
+pbmc_merge_lym_pass3_5_sub <- FindSubCluster(pbmc_merge_lym_pass3_5, "5", resolution = 0.26, graph.name = "SCT_snn")
+
+#5_0: B cells
+#5_1: B cells
+#5_2: doublets
+#5_3: pdc
+
+
+#==============================================================================#
+# Integrate Lymphoid, pass 4 ----
+#==============================================================================#
+# Lymphoid pass 4 remove doublet cluster
+#5_0: B cells
+#5_1: B cells
+#5_2: doublets
+#5_3: pdc
+lymphoid_pass4 <- c("0", "1", "2", "3", "4", "5_0", "5_1", "5_3", "6")
+# we are using sub.cluster 
+Idents(pbmc_merge_lym_pass3_sub) <- "sub.cluster"
+# get number of cells in each cluster
+table(Idents(pbmc_merge_lym_pass3_sub))
+#5_0     4     1     0   5_1     3   5_2     2     6   5_3 
+#1297  4781  8845 10482  1040  6389   474  7534  1154   249 
+
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_lym_pass4 <- subset(pbmc_merge_lym_pass3_sub, idents = lymphoid_pass4)
+table(pbmc_merge_lym_pass4@meta.data$sub.cluster)
+#0     1     2     3     4   5_0   5_1   5_3     6 
+#10482  8845  7534  6389  4781  1297  1040   249  1154 
+
+# Drop levels
+pbmc_merge_lym_pass4@meta.data[["sub.cluster"]] <- as.factor(pbmc_merge_lym_pass4@meta.data[["sub.cluster"]])
+pbmc_merge_lym_pass4@meta.data[["sub.cluster"]] <- droplevels(pbmc_merge_lym_pass4@meta.data[["sub.cluster"]])
+
+DefaultAssay(pbmc_merge_lym_pass4) <- "SoupX_RNA"
+pbmc_merge_lym_pass4 <- JoinLayers(pbmc_merge_lym_pass4)
+#pbmc_merge_lym_pass4
+
+# Split layers by RUN
+pbmc_merge_lym_pass4[["SoupX_RNA"]] <- split(pbmc_merge_lym_pass4[["SoupX_RNA"]], f = pbmc_merge_lym_pass4$UPN_Cycle_Day_Sample_Type_Batch)
+#pbmc_merge_lym_pass4
+
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_lym_pass4 <- SCTransform(pbmc_merge_lym_pass4, assay = "SoupX_RNA", 
+                                    vst.flavor = "v2",
+                                    vars.to.regress = c("S.Score", "G2M.Score"),
+                                    return.only.var.genes = FALSE,
+                                    variable.features.n = 2500)
+
+pbmc_merge_lym_pass4 <- RunPCA(pbmc_merge_lym_pass4)
+npcs <- min(get_pcs(pbmc_merge_lym_pass4))
+npcs # 14 (2500)
+Sys.time()
+
+min(table(pbmc_merge_lym_pass4$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 42
+
+# Integrate the layers using the SCT values
+pbmc_merge_lym_pass4 <- IntegrateLayers(object = pbmc_merge_lym_pass4, 
+                                        method = RPCAIntegration,
+                                        assay = "SCT", # either specify here or run default assay to SCT
+                                        orig.reduction = "pca", 
+                                        new.reduction = "integrated.rpca",
+                                        verbose = FALSE,
+                                        normalization.method = "SCT", 
+                                        dims = 1:npcs,
+                                        k.weight = 35
+)
 
 
 
-obj_T_fltr_rclstr_sbclstr_fnl_TCR <- combineExpression(combined2, obj_T_fltr_rclstr_sbclstr_fnl,
-                                                       group.by = "UPN_Cycle_Day_Sample_Type",
-                                                       filterNA = FALSE,
-                                                       proportion = FALSE,
-                                                       cloneCall="strict",
-                                                       cloneTypes=c(Single=1, Small=5, Medium=20, Large=100, Hyperexpanded=500))
-
-slot(obj_T_fltr_rclstr_sbclstr_fnl_TCR, 
-     "meta.data")$cloneType <- factor(slot(obj_T_fltr_rclstr_sbclstr_fnl_TCR, "meta.data")$cloneType, 
-                                      levels = c("Hyperexpanded (100 < X <= 500)", "Large (20 < X <= 100)", 
-                                                 "Medium (5 < X <= 20)", "Small (1 < X <= 5)", 
-                                                 "Single (0 < X <= 1)", NA))
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_lym_pass4 <- FindNeighbors(pbmc_merge_lym_pass4, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_lym_pass4 <- RunUMAP(pbmc_merge_lym_pass4, dims = 1:npcs, verbose = FALSE, 
+                                reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_lym_pass4 <- FindClusters(pbmc_merge_lym_pass4, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
 
 
-## SAVE ##
-saveRDS(combined2, "/scratch/aoill/projects/CAR-T/00_final/00_GEO_rds/PBMC_TCR_clonotype_scReperroire.rds")
+
+# Label 
+pbmc_merge_lym_pass4@meta.data$ct_clusters <- NA
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("0")] <- "T cells"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("1")] <- "NK/NKT"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("2")] <- "T cells"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("3")] <- "T cells"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("4")] <- "B"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("5")] <- "T cells"
+pbmc_merge_lym_pass4@meta.data$ct_clusters[
+  pbmc_merge_lym_pass4@meta.data$SCT_snn_res.0.2 %in% c("6")] <- "pDC"
 
 
-#### Get normalized TCR frequencies and categories ----
-# TCRs with a frequency of 1 will be categorized as non-expanded 
-# Distribution of TCR frequencies normalized will only include TCRs with a 
-# frequency > 1
+#==============================================================================#
+# Integrate T cells, pass 1 ----
+#==============================================================================#
+t_cells <- c("0", "2", "3", "5")
+# we are using SCT_snn_res.0.2 
+Idents(pbmc_merge_lym_pass4) <- "SCT_snn_res.0.2"
+# get number of cells in each cluster
+table(Idents(pbmc_merge_lym_pass4))
+#0     1     2     3     4     5     6 
+#12439  9879  8579  7159  2354  1111   250
+
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_T_cells <- subset(pbmc_merge_lym_pass4, idents = t_cells)
+table(pbmc_merge_T_cells@meta.data$SCT_snn_res.0.2)
+#    0     1     2     3     4     5     6 
+# 12439     0  8579  7159     0  1111     0 
+
+
+# Drop levels
+pbmc_merge_T_cells@meta.data[["SCT_snn_res.0.2"]] <- as.factor(pbmc_merge_T_cells@meta.data[["SCT_snn_res.0.2"]])
+pbmc_merge_T_cells@meta.data[["SCT_snn_res.0.2"]] <- droplevels(pbmc_merge_T_cells@meta.data[["SCT_snn_res.0.2"]])
+
+DefaultAssay(pbmc_merge_T_cells) <- "SoupX_RNA"
+pbmc_merge_T_cells <- JoinLayers(pbmc_merge_T_cells)
+#pbmc_merge_T_cells
+
+# Split layers by RUN
+#pbmc_merge_T_cells[["SoupX_RNA"]] <- split(pbmc_merge_T_cells[["SoupX_RNA"]], f = pbmc_merge_T_cells$UPN_Cycle_Day_Sample_Type_Batch)
+pbmc_merge_T_cells[["SoupX_RNA"]] <- split(pbmc_merge_T_cells[["SoupX_RNA"]], f = pbmc_merge_T_cells$Batch)
+#pbmc_merge_T_cells
+
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_T_cells <- SCTransform(pbmc_merge_T_cells, assay = "SoupX_RNA", 
+                                  vst.flavor = "v2",
+                                  vars.to.regress = c("S.Score", "G2M.Score"),
+                                  return.only.var.genes = FALSE,
+                                  variable.features.n = 2500)
+
+
+# Get variable features minus TRBV genes
+orig_var_feat_tcells <- pbmc_merge_T_cells@assays[["SCT"]]@var.features
+filt_var_feat_tcells <- grep("^TRBV", orig_var_feat_tcells, invert = TRUE, value = TRUE)
+
+
+pbmc_merge_T_cells <- RunPCA(pbmc_merge_T_cells, features = filt_var_feat_tcells)
+npcs <- min(get_pcs(pbmc_merge_T_cells))
+npcs # 14 (2500)
+Sys.time()
+
+
+min(table(pbmc_merge_T_cells$UPN_Cycle_Day_Sample_Type_Batch))
+min(table(pbmc_merge_T_cells$Batch))
+#[1] 320
+
+# Integrate by Batch when getting this error: Error in idx[i, ] <- res[[i]][[1]] : 
+#number of items to replace is not a multiple of replacement length
+# Integrate the layers using the SCT values
+pbmc_merge_T_cells <- IntegrateLayers(object = pbmc_merge_T_cells, 
+                                      method = RPCAIntegration,
+                                      assay = "SCT", # either specify here or run default assay to SCT
+                                      orig.reduction = "pca", 
+                                      new.reduction = "integrated.rpca",
+                                      verbose = FALSE,
+                                      normalization.method = "SCT", 
+                                      dims = 1:npcs#,
+                                      #k.weight = 20
+)
+
+
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_T_cells <- FindNeighbors(pbmc_merge_T_cells, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_T_cells <- RunUMAP(pbmc_merge_T_cells, dims = 1:npcs, verbose = FALSE, 
+                              reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_T_cells <- FindClusters(pbmc_merge_T_cells, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
+
+#------------------------------------------------------------------------------#
+## Sub-cluster ----
+#------------------------------------------------------------------------------#
+# 5 is doulet and part of cluster 3
+Idents(pbmc_merge_T_cells) <- "SCT_snn_res.0.2"
+pbmc_merge_T_cells_sbclt <- FindSubCluster(pbmc_merge_T_cells, "3", 
+                                           resolution = 0.12, graph.name = "SCT_snn")
+Idents(pbmc_merge_T_cells_sbclt) <- "sub.cluster"
+pbmc_merge_T_cells_sbclt <- FindSubCluster(pbmc_merge_T_cells_sbclt, "3_1", 
+                                           resolution = 0.15, graph.name = "SCT_snn")
+
+
+#==============================================================================#
+# Integrate T cells, pass 2 ----
+#==============================================================================#
+t_cells_pass2 <- c("0", "1", "2_0", "2_1_0", "2_1_1", "3_0", "3_1_0", "4")
+# we are using sub.cluster 
+Idents(pbmc_merge_T_cells_sbclt) <- "sub.cluster"
+# get number of cells in each cluster
+table(Idents(pbmc_merge_T_cells_sbclt))
+#3_0     1     4     0   2_0     5 3_1_0 3_1_1 2_1_0 2_1_1 
+#2782  7425  1886  8692  6050   572   943   165   523   250 
+
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_T_cells_pass2 <- subset(pbmc_merge_T_cells_sbclt, idents = t_cells_pass2)
+table(pbmc_merge_T_cells_pass2@meta.data$sub.cluster)
+#0     1   2_0 2_1_0 2_1_1   3_0 3_1_0     4 
+#8692  7425  6050   523   250  2782   943  1886 
+
+
+# Drop levels
+pbmc_merge_T_cells_pass2@meta.data[["sub.cluster"]] <- as.factor(pbmc_merge_T_cells_pass2@meta.data[["sub.cluster"]])
+pbmc_merge_T_cells_pass2@meta.data[["sub.cluster"]] <- droplevels(pbmc_merge_T_cells_pass2@meta.data[["sub.cluster"]])
+
+DefaultAssay(pbmc_merge_T_cells_pass2) <- "SoupX_RNA"
+pbmc_merge_T_cells_pass2 <- JoinLayers(pbmc_merge_T_cells_pass2)
+#pbmc_merge_T_cells_pass2
+
+# Split layers by RUN
+#pbmc_merge_T_cells_pass2[["SoupX_RNA"]] <- split(pbmc_merge_T_cells_pass2[["SoupX_RNA"]], f = pbmc_merge_T_cells_pass2$UPN_Cycle_Day_Sample_Type_Batch)
+pbmc_merge_T_cells_pass2[["SoupX_RNA"]] <- split(pbmc_merge_T_cells_pass2[["SoupX_RNA"]], f = pbmc_merge_T_cells_pass2$Batch)
+
+
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_T_cells_pass2 <- SCTransform(pbmc_merge_T_cells_pass2, assay = "SoupX_RNA", 
+                                        vst.flavor = "v2",
+                                        vars.to.regress = c("S.Score", "G2M.Score"),
+                                        return.only.var.genes = FALSE,
+                                        variable.features.n = 2500)
+
+
+# Get variable features minus TRBV genes
+orig_var_feat_tcells <- pbmc_merge_T_cells_pass2@assays[["SCT"]]@var.features
+filt_var_feat_tcells <- grep("^TRBV", orig_var_feat_tcells, invert = TRUE, value = TRUE)
+length(orig_var_feat_tcells)
+length(filt_var_feat_tcells)
+
+pbmc_merge_T_cells_pass2 <- RunPCA(pbmc_merge_T_cells_pass2, features = filt_var_feat_tcells)
+npcs <- min(get_pcs(pbmc_merge_T_cells_pass2))
+npcs # 14 (2500)
+Sys.time()
+
+min(table(pbmc_merge_T_cells_pass2$UPN_Cycle_Day_Sample_Type_Batch))
+min(table(pbmc_merge_T_cells_pass2$Batch))
+#[1] 307
+
+# Integrate by Batch when getting this error: Error in idx[i, ] <- res[[i]][[1]] : 
+#number of items to replace is not a multiple of replacement length
+# Integrate the layers using the SCT values
+pbmc_merge_T_cells_pass2 <- IntegrateLayers(object = pbmc_merge_T_cells_pass2, 
+                                            method = RPCAIntegration,
+                                            assay = "SCT", # either specify here or run default assay to SCT
+                                            orig.reduction = "pca", 
+                                            new.reduction = "integrated.rpca",
+                                            verbose = FALSE,
+                                            normalization.method = "SCT", 
+                                            dims = 1:npcs#,
+                                            #k.weight = 20
+)
+
+
+
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_T_cells_pass2 <- FindNeighbors(pbmc_merge_T_cells_pass2, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_T_cells_pass2 <- RunUMAP(pbmc_merge_T_cells_pass2, dims = 1:npcs, verbose = FALSE, 
+                                    reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_T_cells_pass2 <- FindClusters(pbmc_merge_T_cells_pass2, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
+
+
+
+DefaultAssay(pbmc_merge_T_cells_pass2)
+# SoupX_RNA
+DefaultAssay(pbmc_merge_T_cells_pass2) <- "RNA"
+pbmc_merge_T_cells_pass2 <- JoinLayers(pbmc_merge_T_cells_pass2)
+pbmc_merge_T_cells_pass2@meta.data$IL13OPCounts <- pbmc_merge_T_cells_pass2[["RNA"]]$counts["IL13OP",]
+pbmc_merge_T_cells_pass2@meta.data$CART <- ifelse((pbmc_merge_T_cells_pass2@meta.data$IL13OPCounts >= 3), "Positive", "Negative")
+table(pbmc_merge_T_cells_pass2@meta.data$CART)
+DefaultAssay(pbmc_merge_T_cells_pass2) <- "SoupX_RNA"
+
+
+#------------------------------------------------------------------------------#
+## Sub-cluster ----
+#------------------------------------------------------------------------------#
+# Cluster 2 
+Idents(pbmc_merge_T_cells_pass2) <- "SCT_snn_res.0.2"
+pbmc_merge_T_cells_pass2_sub <- FindSubCluster(pbmc_merge_T_cells_pass2, 
+                                                 "2", resolution = 0.3, graph.name = "SCT_snn")
+
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters <- NA
+
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("0")] <- "T1"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("1")] <- "T2"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_0")] <- "T7"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_1")] <- "T8"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_2")] <- "T9"
+
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_3")] <- "T3"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_4")] <- "T10"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("2_5")] <- "T4"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("3")] <- "T5"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_clusters[
+  pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster %in% c("4")] <- "T6"
+
+
+# Then subcluster T3
+Idents(pbmc_merge_T_cells_pass2_sub) <- "ct_clusters_num"
+pbmc_merge_T_cells_pass2_sub <- FindSubCluster(pbmc_merge_T_cells_pass2_sub, "T3", resolution = 0.2, graph.name = "SCT_snn")
+
+# Then subcluster T1
+Idents(pbmc_merge_T_cells_pass2_sub) <- "sub.cluster"
+pbmc_merge_T_cells_pass2_sub <- FindSubCluster(pbmc_merge_T_cells_pass2_sub, "T1", resolution = 0.2, graph.name = "SCT_snn")
+
+
+Idents(pbmc_merge_T_cells_pass2_sub) <- "sub.cluster"
+pbmc_merge_T_cells_pass2_sub <- FindSubCluster(pbmc_merge_T_cells_pass2_sub, "T1_1", resolution = 0.15, graph.name = "SCT_snn")
+
+
+#------------------------------------------------------------------------------#
+## Label T cell states ----
+#------------------------------------------------------------------------------#
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final <- NA # or any other initialization value
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T1_0"] <- "Effector"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T1_1_0"] <- "Effector-memory"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T1_1_1"] <- "Effector"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T1_2"] <- "Effector"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T2"] <- "Naïve"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T3_0"] <- "Treg"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T3_1"] <- "GAPDH+ Glycolysis"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T3_2"] <- "Proliferating"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T4"] <- "Central memory"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T5"] <- "Effector"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T6"] <- "MAIT"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T7"] <- "Central memory"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T8"] <- "Memory"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T9"] <- "Memory"
+pbmc_merge_T_cells_pass2_sub@meta.data$ct_final[pbmc_merge_T_cells_pass2_sub@meta.data$sub.cluster == "T10"] <- "Treg"
+
+
+#------------------------------------------------------------------------------#
+## Add cell types and T cell states to the lymphoid object ----
+#------------------------------------------------------------------------------#
+pbmc_merge_lym_pass4_meta <- pbmc_merge_lym_pass4@meta.data
+pbmc_merge_lym_pass4_meta$cellID <- rownames(pbmc_merge_lym_pass4_meta)
+pbmc_merge_T_cells_pass2_sub_meta <- pbmc_merge_T_cells_pass2_sub@meta.data %>% dplyr::select(ct_final)
+pbmc_merge_T_cells_pass2_sub_meta$cellID <- rownames(pbmc_merge_T_cells_pass2_sub_meta)
+colnames(pbmc_merge_T_cells_pass2_sub_meta) <- c("ct_final_T", "cellID")  
+
+
+pbmc_merge_lym_pass4_meta_join <- left_join(pbmc_merge_lym_pass4_meta, pbmc_merge_T_cells_pass2_sub_meta)
+pbmc_merge_lym_pass4@meta.data <- pbmc_merge_lym_pass4_meta_join
+rownames(pbmc_merge_lym_pass4@meta.data) <- pbmc_merge_lym_pass4_meta$cellID
+
+
+pbmc_merge_lym_pass4@meta.data$ct_final_all <- pbmc_merge_lym_pass4@meta.data$ct_final # or any other initialization value
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Effector"] <- "T (Effector)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Effector-memory"] <- "T (Effector-memory)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Naïve"] <- "T (Naïve)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Treg"] <- "Treg"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "GAPDH+ Glycolysis"] <- "T (GAPDH+ Glycolysis)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Proliferating"] <- "T (Proliferating)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Central memory"] <- "T (Central memory)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "MAIT"] <- "T (MAIT)"
+pbmc_merge_lym_pass4@meta.data$ct_final_all[pbmc_merge_lym_pass4@meta.data$ct_final_T == "Memory"] <- "T (Memory)"
+
+
+#------------------------------------------------------------------------------#
+## Add TCR data to lymphoid object ----
+#------------------------------------------------------------------------------#
+combined2 <- readRDS("/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/pbmc_scRepertoire_output.rds")
+
+# Pull out T cells
+table(pbmc_merge_lym_pass4@meta.data$ct_final)
+t_cells <- c("T (Effector)", "T (Naïve)", "T (MAIT)",
+             "T (Effector-memory)", "T (Memory)", "T (GAPDH+ Glycolysis)",
+             "T (Central memory)", "Treg", "T (Proliferating)"
+)
+pbmc_tcells_TCR <- subset(pbmc_merge_lym_pass4, subset = ct_final_all %in% t_cells)
+
+pbmc_tcells_TCR <- combineExpression(combined2, pbmc_tcells,
+                               group.by = "UPN_Cycle_Day_Sample_Type",
+                               filterNA = FALSE,
+                               proportion = FALSE,
+                               cloneCall="strict",
+                               cloneSize=c(Single=1, Small=5, Medium=20,
+                                           Large=100, Hyperexpanded=500)
+)
+pbmc_tcells_TCR@meta.data$cloneSize[is.na(pbmc_tcells_TCR_TCR@meta.data$cloneSize)] <- "None ( < X <= 0)"
+
+
 
 # calculate Frequency_norm
-tmp_meta <- obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data
+tmp_meta <- pbmc_tcells_TCR@meta.data
 
 # Add a T cell number count for each UPN patient and cycle
-tmp_meta <- obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data %>%
+tmp_meta <- pbmc_tcells_TCR@meta.data %>%
   #add_count(UPN, name = "UPN_n")
   add_count(UPN_Cycle, name = "UPN_Cycle_n")
 
 # Get normalized TCR frequency
-tmp_meta$Frequency_norm <- tmp_meta$Frequency/tmp_meta$UPN_Cycle_n
+tmp_meta$Frequency_norm <- tmp_meta$clonalFrequency/tmp_meta$UPN_Cycle_n
 
-obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$UPN_Cycle_n <- tmp_meta$UPN_Cycle_n
-obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Frequency_norm <- tmp_meta$Frequency_norm
+pbmc_tcells_TCR@meta.data$UPN_Cycle_n <- tmp_meta$UPN_Cycle_n
+pbmc_tcells_TCR@meta.data$Frequency_norm <- tmp_meta$Frequency_norm
 
 
 tmp_meta_sub <- tmp_meta %>%
-  dplyr::select(UPN, Sample_Type, Cycle, Cycle_Day, CART, CTstrict, Frequency,
+  dplyr::select(UPN, Sample_Type, Cycle, CART, CTstrict, clonalFrequency,
                 Frequency_norm)
 rownames(tmp_meta) <- NULL
 tmp_meta_sub <- na.omit(tmp_meta_sub)
@@ -700,7 +1476,7 @@ tmp_meta_sub_unique <- unique(tmp_meta_sub)
 tmp_meta <- tmp_meta_sub_unique
 
 # Remove any TCR with a frequency of 1
-tmp_meta <- tmp_meta %>% dplyr::filter(Frequency > 1)
+tmp_meta <- tmp_meta %>% dplyr::filter(clonalFrequency > 1)
 
 # Get cut offs
 n <- 20
@@ -722,6 +1498,7 @@ ggplot(tmp_meta, aes(x=Frequency_norm)) +
   geom_histogram(color="black", fill="white", bins = 50#, 
                  #aes(y=..density..), position="identity"
   ) +
+  #geom_density() +
   scale_x_log10() +
   xlab("Normalized TCR Freq") + ylab("Count") +
   theme_classic() +
@@ -735,404 +1512,325 @@ ggplot(tmp_meta, aes(x=Frequency_norm)) +
 
 # Get expanded vs not expanded categories with expanded categories separated by
 # how expanded they are
-obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data <- obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data %>% 
-  mutate(Frequency_norm_cat = case_when(Frequency == 1 ~ "Not Expanded",
+pbmc_tcells_TCR@meta.data <- pbmc_tcells_TCR@meta.data %>% 
+  mutate(Frequency_norm_cat = case_when(clonalFrequency == 1 ~ "Not Expanded",
                                         Frequency_norm < min(TCRs_top20$Frequency_norm) ~ "Not Expanded",
                                         (Frequency_norm >= min(TCRs_top20$Frequency_norm) & Frequency_norm < min(TCRs_top5$Frequency_norm)) ~ "Expanded (Top 20% - 5%)",
                                         (Frequency_norm >= min(TCRs_top5$Frequency_norm) & Frequency_norm < min(TCRs_top1$Frequency_norm)) ~ "More Expanded (Top 5% - 1%)",
                                         Frequency_norm >= min(TCRs_top1$Frequency_norm) ~ "Most Expanded (Top 1%)",
                                         
                                         TRUE ~ as.character(NA))) 
-table(obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Frequency_norm_cat)
+table(pbmc_tcells_TCR@meta.data$Frequency_norm_cat)
 
 
 # Get expanded vs not expanded categories
-obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data <- obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data %>% 
-  mutate(Frequency_norm_cat_2 = case_when(Frequency == 1 ~ "Not Expanded",
+pbmc_tcells_TCR@meta.data <- pbmc_tcells_TCR@meta.data %>% 
+  mutate(Frequency_norm_cat_2 = case_when(clonalFrequency == 1 ~ "Not Expanded",
                                           Frequency_norm < min(TCRs_top20$Frequency_norm) ~ "Not Expanded",
                                           (Frequency_norm >= min(TCRs_top20$Frequency_norm) & Frequency_norm < min(TCRs_top5$Frequency_norm)) ~ "Expanded",
                                           (Frequency_norm >= min(TCRs_top5$Frequency_norm) & Frequency_norm < min(TCRs_top1$Frequency_norm)) ~ "Expanded",
                                           Frequency_norm >= min(TCRs_top1$Frequency_norm) ~ "Expanded",
                                           
                                           TRUE ~ as.character(NA))) 
-table(obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Frequency_norm_cat_2)
+table(pbmc_tcells_TCR@meta.data$Frequency_norm_cat_2)
+
+
+
+# add in T cell TCR frequency back into the lymphoid object (will also need to
+# add it to the T cell object TODO)
+#colnames(pbmc_tcells_TCR@meta.data)
+pbmc_tcells_TCR_tcr_meta <- pbmc_tcells_TCR@meta.data %>%
+  dplyr::select(cellID, 
+                CTgene, CTnt, CTaa, CTstrict, clonalProportion, clonalFrequency, 
+                cloneSize, 
+                Frequency_norm, Frequency_norm_cat, Frequency_norm_cat_2)
+pbmc_tcells_TCR_meta_rnames <- rownames(pbmc_tcells_TCR@meta.data)
+
+pbmc_merge_lym_pass4_meta <- pbmc_merge_lym_pass4@meta.data
+pbmc_merge_lym_pass4_meta_rnames <- rownames(pbmc_merge_lym_pass4@meta.data)
+
+
+dim(pbmc_merge_lym_pass4_meta)
+dim(pbmc_tcells_TCR_tcr_meta)
+pbmc_merge_lym_pass4_meta_l_join <- left_join(pbmc_merge_lym_pass4_meta, pbmc_tcells_TCR_tcr_meta)
+dim(pbmc_merge_lym_pass4_meta_l_join) 
+
+
+pbmc_merge_lym_pass4@meta.data <- pbmc_merge_lym_pass4_meta_l_join
+rownames(pbmc_merge_lym_pass4@meta.data) <- pbmc_merge_lym_pass4_meta_rnames
+
+
+# Reorder sample
+pbmc_merge_lym_pass4@meta.data$UPN_Cycle <- factor(x = pbmc_merge_lym_pass4@meta.data$UPN_Cycle, 
+                                       levels = c("514_2", "514_5", "514_8", "514_11", "514_13",
+                                                  "515_4", "515_8",
+                                                  "574_1", "574_3", "574_8",  
+                                                  "689_1", "689_4", "689_8", "689_12", "689_17", 
+                                                  "692_2", "692_4",
+                                                  "705_5", "705_8",  
+                                                  "716_2", "716_4", "716_8"))
+
+
+pbmc_merge_lym_pass4@meta.data$Frequency_norm_cat <- factor(pbmc_merge_lym_pass4@meta.data$Frequency_norm_cat, 
+                                                levels = c("Most Expanded (Top 1%)", 
+                                                           "More Expanded (Top 5% - 1%)", 
+                                                           "Expanded (Top 20% - 5%)",
+                                                           "Not Expanded",
+                                                           "NA"))
 
 
 #------------------------------------------------------------------------------#
-### Run scGSVA analysis ----
+## Add metadata ----
 #------------------------------------------------------------------------------#
-# Re-do this analysis with the set of genes from Colt
-gs4_deauth()
+# Response categories
+pbmc_merge_lym_pass4@meta.data$Response_cat <- "NA" # or any other initialization value
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "514_2"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "514_5"] <- "Non-response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "514_8"] <- "Response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "514_11"] <- "Non-response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "514_13"] <- "Non-response"
 
-canonical_markers  <- gs4_get("https://docs.google.com/spreadsheets/d/1S-NFiWaE9TqOUXyklvwevLpahCPHNNC8IJl9t1MPis4/edit#gid=1375531067")
-sheet_names(canonical_markers)
-canonical_markers <- read_sheet(canonical_markers, sheet = "Sheet3")
-head(canonical_markers)
-tail(canonical_markers)
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "515_4"] <- "Response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "515_8"] <- "Non-response"
 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "574_1"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "574_3"] <- "Non-response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "574_8"] <- "Non-response"
 
-canonical_markers_small <- canonical_markers[,which(colnames(canonical_markers) %in% c("RNA", "Gene_sets"))]
-canonical_markers_small <- canonical_markers_small[complete.cases(canonical_markers_small),]
-colnames(canonical_markers_small) <- c("GeneID", "Annot")
-head(canonical_markers_small)
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "689_1"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "689_4"] <- "Response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "689_8"] <- "Response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "689_12"] <- "Non-response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "689_17"] <- "Non-response"
 
-# Genes for module scoring
-nkt_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="NKT"),]$RNA, c(NA))
-cd8_naive_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Naive"),]$RNA, c(NA))
-cd4_naive_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD4_Naive"),]$RNA, c(NA))
-cd8_effector_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Effector"),]$RNA, c(NA))
-cd4_effector_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD4_Effector"),]$RNA, c(NA))
-cd8_memory_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Memory"),]$RNA, c(NA))
-cd4_memory_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD4_Memory"),]$RNA, c(NA))
-cd8_effector_memory_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Effector_Memory"),]$RNA, c(NA))
-cd8_central_memory_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Central_Memory"),]$RNA, c(NA))
-cd8_resident_memory_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Resident_Memory"),]$RNA, c(NA))
-cd8_exhausted_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="CD8_Exhausted"),]$RNA, c(NA))
-activated_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="Activated"),]$RNA, c(NA))
-proliferating_markers <- setdiff(canonical_markers[which(canonical_markers$Gene_sets=="Proliferating"),]$RNA, c(NA))
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "692_2"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "692_4"] <- "Response"
 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "705_1"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "705_5"] <- "Non-response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "705_8"] <- "Non-response"
 
-hsko <- buildAnnot(species="human", keytype="SYMBOL", anntype="GO")
-hsko@species
-hsko@anntype <- "custom"
-hsko@keytype
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "716_2"] <- "Baseline"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "716_4"] <- "Response"
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "716_8"] <- "Response"
 
-typeof(hsko@annot)
-head(hsko@annot)
-tmp <- hsko@annot
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "625_3"] <- "Non-response" 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "625_4"] <- "Non-response" 
 
-# Must have three columns: GeneID, Term or dummy, Annotation
-canonical_markers_small[,c("Term")] <- canonical_markers_small$Annot
-canonical_markers_small <- canonical_markers_small[,c("GeneID", "Term", "Annot")]
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "626_4"] <- "Response" 
+pbmc_merge_lym_pass4@meta.data$Response_cat[pbmc_merge_lym_pass4@meta.data$UPN_Cycle == "626_7"] <- "Non-response" 
 
-hsko@annot <- as.data.frame(canonical_markers_small)
-head(hsko@annot)
-tail(hsko@annot)
-levels(as.factor(hsko@annot$Annot))
-typeof(hsko@annot)
-
-DefaultAssay(obj_T_fltr_rclstr_sbclstr_fnl_TCR) 
-DefaultAssay(obj_T_fltr_rclstr_sbclstr_fnl_TCR) <- "SoupX_RNA"
-res <- scgsva(obj_T_fltr_rclstr_sbclstr_fnl_TCR, hsko) 
-
-res_df <- as.data.frame(res)
-
-rownames(res_df)
-
-identical(rownames(res_df), colnames(obj_T_fltr_rclstr_sbclstr_fnl_TCR))
-
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$NKT <- res_df$NKT
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Naive <- res_df$CD8_Naive
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD4_Naive <- res_df$CD4_Naive
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Effector <- res_df$CD8_Effector
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD4_Effector <- res_df$CD4_Effector
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Memory <- res_df$CD8_Memory
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD4_Memory <- res_df$CD4_Memory
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Effector_Memory <- res_df$CD8_Effector_Memory
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Central_Memory <- res_df$CD8_Central_Memory
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Resident_Memory <- res_df$CD8_Resident_Memory
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$CD8_Exhausted <- res_df$CD8_Exhausted
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$Activated <- res_df$Activated
-obj_T_fltr_rclstr_sbclstr_fnl_TCR$Proliferating <- res_df$Proliferating
+table(pbmc_merge_lym_pass4@meta.data$Response_cat)
 
 
-# Plot all on same axis 
-maxpltval <- max((obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$NKT), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Naive),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Naive), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Effector), 
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Effector), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Memory), 
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Memory), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Effector_Memory),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Central_Memory), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Resident_Memory),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Exhausted), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Activated),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Proliferating))
-minpltval <- min((obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$NKT), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Naive),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Naive), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Effector), 
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Effector), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Memory), 
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD4_Memory), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Effector_Memory),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Central_Memory), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Resident_Memory),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$CD8_Exhausted), (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Activated),
-                 (obj_T_fltr_rclstr_sbclstr_fnl_TCR@meta.data$Proliferating))
+# add disease info
+pbmc_merge_lym_pass4@meta.data$tumor_type <- NA # or any other initialization value
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "514"] <- "Ependymoma"
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "574"] <- "Ependymoma"
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "625"] <- "Ependymoma" 
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "689"] <- "Ependymoma"
 
-maxpltval <- 0.7
-minpltval <- -0.4
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "515"] <- "DMG"
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "626"] <- "DMG" 
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "692"] <- "DMG"
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "716"] <- "DMG"
 
-FeaturePlot(obj_T_fltr_rclstr_sbclstr_fnl_TCR, features = c(#"NKT", 
-  "CD8_Naive", "CD8_Effector", "CD8_Memory", 
-  "CD8_Effector_Memory", "CD8_Central_Memory",
-  "CD8_Resident_Memory", "CD8_Exhausted",
-  "CD4_Naive", "CD4_Effector", "CD4_Memory",
-  "Activated", "Proliferating"), 
-  reduction = "integrated_sct_umap", ncol = 4#, cols = c("white", "blue")
-) & 
-  scale_colour_gradientn(colours = rev(brewer.pal(n = 11, name = "RdBu")),
-                         breaks=c(minpltval,maxpltval), limits=c(minpltval,maxpltval)) 
+pbmc_merge_lym_pass4@meta.data$tumor_type[pbmc_merge_lym_pass4@meta.data$UPN == "705"] <- "Glioblastoma"
+
+head(pbmc_merge_lym_pass4@meta.data)
+
+
+# add lymphodepletion status
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion <- NA # or any other initialization value
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "625"] <- "Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "626"] <- "Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "689"] <- "Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "705"] <- "Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "716"] <- "Lymphodepleted" 
+pbmc_merge_lym_pass4@meta.data$Lymphodepletion[pbmc_merge_lym_pass4@meta.data$UPN == "692"] <- "Lymphodepleted" 
 
 
 #------------------------------------------------------------------------------#
-### Save object ----
+## Save ----
 #------------------------------------------------------------------------------#
-saveRDS(obj_T_fltr_rclstr_sbclstr_fnl_TCR, 
-        "/scratch/aoill/projects/CAR-T/00_final/00_GEO_rds/PBMC_T_cell_obj_2023.rds")
+saveRDS(pbmc_merge_lym_pass4, "/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/pbmc_lymphoid_seurat_obj.rds")
 
 
-#------------------------------------------------------------------------------#
-## Full object ----
-#------------------------------------------------------------------------------#
+#==============================================================================#
+# Integrate Myeloid, pass 2 ----
+#==============================================================================#
+# Myeloid pass 2: Remove cluster 6 from pbmc_merge_sub_mye and re-integrate 
+# pbmc_merge_sub_mye, SCT_snn_res.0.2
+myeloid_pass2 <- c("0", "1", "2", "3", "4", "5")
 
-#------------------------------------------------------------------------------#
-### Add response information full object ----
-#------------------------------------------------------------------------------#
-pbmc_integrated@meta.data$UPN_Cycle <- paste(pbmc_integrated@meta.data$UPN, pbmc_integrated@meta.data$Cycle, sep = "_")
-levels(as.factor(pbmc_integrated@meta.data$UPN_Cycle))
-
-pbmc_integrated@meta.data$ResponseNon <- NA # or any other initialization value
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "514_5"] <- "Non-Response" # Stable, I originally had this as response but after talking to Leo we decided to change this to stable/non-response
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "514_8"] <- "Response"
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "515_4"] <- "Response"
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "574_8"] <- "Non-Response" # Stable
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "514_11"] <- "Non-Response" # Progression
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "515_8"] <- "Non-Response" # Progression
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "574_3"] <- "Non-Response" # Pseudoprogression
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "625_1"] <- "Non-Response" 
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "625_3"] <- "Non-Response" 
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "625_4"] <- "Non-Response" 
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "626_1"] <- "Non-Response" 
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-pbmc_integrated@meta.data$ResponseNon[pbmc_integrated@meta.data$UPN_Cycle == "626_7"] <- "Non-Response" 
-
-pbmc_integrated@meta.data$Responses <- NA # or any other initialization value
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "514_5"] <- "Stable" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "514_8"] <- "Response"
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "515_4"] <- "Response"
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "574_8"] <- "Stable"
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "514_11"] <- "Progression"
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "515_8"] <- "Progression"
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "574_3"] <- "Pseudoprogression" # Do we change to stable?
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "625_3"] <- "Progression" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "625_4"] <- "Progression" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-pbmc_integrated@meta.data$Responses[pbmc_integrated@meta.data$UPN_Cycle == "626_7"] <- "Progression" 
-
-table(pbmc_integrated@meta.data$ResponseNon)
-table(pbmc_integrated@meta.data$Responses)
+# pbmc_merge_sub_mye, SCT_snn_res.0.2
+myeloid_pass2 <- c("0", "1", "2", "3", "4", "5")
 
 
-#------------------------------------------------------------------------------#
-### Add lymphodepletion information full object ----
-#------------------------------------------------------------------------------#
-pbmc_integrated@meta.data$Lymphodepletion <- NA # or any other initialization value
-pbmc_integrated@meta.data$Lymphodepletion[pbmc_integrated@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
-pbmc_integrated@meta.data$Lymphodepletion[pbmc_integrated@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
-pbmc_integrated@meta.data$Lymphodepletion[pbmc_integrated@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
-pbmc_integrated@meta.data$Lymphodepletion[pbmc_integrated@meta.data$UPN == "625"] <- "Lymphodepleted" 
-pbmc_integrated@meta.data$Lymphodepletion[pbmc_integrated@meta.data$UPN == "626"] <- "Lymphodepleted" 
+Idents(pbmc_merge_sub_mye) <- "SCT_snn_res.0.2"
+# get number of cells in each cluster
+table(Idents(pbmc_merge_sub_mye))
+#0     1     2     3     4     5     6 
+#40718 30436 11231  8525  6077  2375   152 
 
-table(pbmc_integrated@meta.data$Lymphodepletion)
+# Get cell names from the clusters that I think are lymphoid cells
+pbmc_merge_mye_pass2 <- subset(pbmc_merge_sub_mye, idents = myeloid_pass2)
+table(pbmc_merge_mye_pass2@meta.data$SCT_snn_res.0.2)
+#0     1     2     3     4     5     6 
+#40718 30436 11231  8525  6077  2375     0 
 
+# Drop levels
+pbmc_merge_mye_pass2@meta.data[["SCT_snn_res.0.2"]] <- as.factor(pbmc_merge_mye_pass2@meta.data[["SCT_snn_res.0.2"]])
+pbmc_merge_mye_pass2@meta.data[["SCT_snn_res.0.2"]] <- droplevels(pbmc_merge_mye_pass2@meta.data[["SCT_snn_res.0.2"]])
 
-#------------------------------------------------------------------------------#
-### Add cell type annotations to full object ----
-#------------------------------------------------------------------------------#
-#### Sub-cluster ----
-# Sub-cluster 4
-Idents(pbmc_integrated) <- "integrated_sct_snn_res.0.2"
-pbmc_integrated_sbclstr_4 <- FindSubCluster(pbmc_integrated, "4", resolution = 0.05, graph.name = "integrated_sct_snn")
-#DimPlot(pbmc_integrated_sbclstr_4, group.by = "sub.cluster", label = T)
+DefaultAssay(pbmc_merge_mye_pass2) <- "SoupX_RNA"
+pbmc_merge_mye_pass2 <- JoinLayers(pbmc_merge_mye_pass2)
+#pbmc_merge_mye_pass2
 
-# Sub-cluster 12
-Idents(pbmc_integrated_sbclstr_4) <- "sub.cluster"
-pbmc_integrated_sbclstr_4_12 <- FindSubCluster(pbmc_integrated_sbclstr_4, "12", resolution = 0.01, graph.name = "integrated_sct_snn")
-#DimPlot(pbmc_integrated_sbclstr_4_12, group.by = "sub.cluster", label = T)
+# Split layers by RUN
+pbmc_merge_mye_pass2[["SoupX_RNA"]] <- split(pbmc_merge_mye_pass2[["SoupX_RNA"]], f = pbmc_merge_mye_pass2$UPN_Cycle_Day_Sample_Type_Batch)
+#pbmc_merge_mye_pass2
 
 
-# Add a label in meta called CT
-# Pull out the following clusters from potential T object: 5, 0, 1, 10, 11, 14
-Idents(potential_T_clusters_integrated_obj) <- "integrated_sct_snn_res.0.5"
-nk_clusters <- c("1", "10", "11")
-NK_integrated_obj <- subset(potential_T_clusters_integrated_obj, idents = nk_clusters)
-NK_integrated_obj@meta.data$CT <- "NK"
+# SCTransform is performed per sample, since they are split into layers
+pbmc_merge_mye_pass2 <- SCTransform(pbmc_merge_mye_pass2, assay = "SoupX_RNA", 
+                                    vst.flavor = "v2",
+                                    vars.to.regress = c("S.Score", "G2M.Score"),
+                                    return.only.var.genes = FALSE,
+                                    variable.features.n = 2500)
 
-mono_clusters <- c("5")
-mono_extra_integrated_obj <- subset(potential_T_clusters_integrated_obj, idents = mono_clusters)
-mono_extra_integrated_obj@meta.data$CT <- "CD14+ Monocytes"
+pbmc_merge_mye_pass2 <- RunPCA(pbmc_merge_mye_pass2)
+npcs <- min(get_pcs(pbmc_merge_mye_pass2))
+npcs # 16 (2500)
+Sys.time()
 
-proliferating_clusters <- c("0")
-proliferating_extra_integrated_obj <- subset(potential_T_clusters_integrated_obj, idents = proliferating_clusters)
-proliferating_extra_integrated_obj@meta.data$CT <- "Proliferating"
+min(table(pbmc_merge_mye_pass2$UPN_Cycle_Day_Sample_Type_Batch))
+#[1] 32
 
-plasma_clusters <- c("14")
-plasma_extra_integrated_obj <- subset(potential_T_clusters_integrated_obj, idents = plasma_clusters)
-plasma_extra_integrated_obj@meta.data$CT <- "Plasma"
-
-# CTs from final T object:
-# CD4+ T: 0_0, 0_1, 2_1
-# CD8+ T: 1_0, 1_1, 2_0, 4, 5, 6, 7, 3_0, 3_1
-integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$CT <- integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$sub.cluster
-
-integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$CT[
-  integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$sub.cluster %in% c("0_0", "0_1", "2_1")] <- "CD4+ T"
-integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$CT[
-  integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$sub.cluster %in% c("1_0", "1_1", "2_0", "3_0", "3_1", "4", "5", "6", "7")] <- "CD8+ T"
-
-
-table(integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data$CT)
-
-
-# Pull out CT from all metadata objects ensuring rownames are maintained 
-# from all except full object
-meta_NK_integrated_obj <- NK_integrated_obj@meta.data
-colnames(meta_NK_integrated_obj)
-
-meta_mono_extra_integrated_obj <- mono_extra_integrated_obj@meta.data
-colnames(meta_mono_extra_integrated_obj)
-
-meta_proliferating_extra_integrated_obj <- proliferating_extra_integrated_obj@meta.data
-colnames(meta_proliferating_extra_integrated_obj)
-
-meta_plasma_extra_integrated_obj <- plasma_extra_integrated_obj@meta.data
-colnames(meta_plasma_extra_integrated_obj)
-
-# T cell object
-meta_integrated_object_T_only_subcluster_1_2_3_0_sub <- integrated_object_T_only_subcluster_1_2_3_0_sub@meta.data
-colnames(meta_integrated_object_T_only_subcluster_1_2_3_0_sub)
-
-
-# Merge these subsetted object metadata with meta from the full object
-# and add in the rest of the cluster labels
-cols_to_keep_tmp <- intersect(colnames(meta_NK_integrated_obj), colnames(meta_mono_extra_integrated_obj))
-cols_to_keep_tmp2 <- intersect(cols_to_keep_tmp, colnames(meta_proliferating_extra_integrated_obj))
-cols_to_keep_tmp3 <- intersect(cols_to_keep_tmp2, colnames(meta_plasma_extra_integrated_obj))
-cols_to_keep_tmp4 <- intersect(cols_to_keep_tmp3, colnames(meta_integrated_object_T_only_subcluster_1_2_3_0_sub))
-
-meta_NK_integrated_obj <- meta_NK_integrated_obj %>% dplyr::select(CT)
-meta_mono_extra_integrated_obj <- meta_mono_extra_integrated_obj %>% dplyr::select(CT)
-meta_proliferating_extra_integrated_obj <- meta_proliferating_extra_integrated_obj %>% dplyr::select(CT)
-meta_plasma_extra_integrated_obj <- meta_plasma_extra_integrated_obj %>% dplyr::select(CT)
-meta_integrated_object_T_only_subcluster_1_2_3_0_sub <- meta_integrated_object_T_only_subcluster_1_2_3_0_sub %>% dplyr::select(CT)
-
-meta_all <- rbind(meta_NK_integrated_obj, meta_mono_extra_integrated_obj, meta_proliferating_extra_integrated_obj,
-                  meta_plasma_extra_integrated_obj, meta_integrated_object_T_only_subcluster_1_2_3_0_sub)
-
-# Merge this metadata with pbmc_integrated_sbclstr_4_12 metadata by row name which is by = 0
-meta_integrated_obj <- pbmc_integrated_sbclstr_4_12@meta.data
-nrow(meta_integrated_obj)
-nrow(meta_all)
-
-meta_integrated_obj_merge <- merge(meta_integrated_obj, meta_all, by = 0, all = T)
-nrow(meta_integrated_obj)
-
-table(meta_integrated_obj_merge$CT)
-
-
-####  Add in cell types ---
-# Add in the other cell types from full object
-# Full object CTs:
-# CD14+ Monocytes: 0, 9, 4_0
-# FCGR3A+ Monocytes: 10
-# B: 8, 11
-# Plasma: 12_0
-# DC: 4_1
-# pDC: 12_1
-#pbmc_integrated_sbclstr_4_12@meta.data$CT <- pbmc_integrated_sbclstr_4_12@meta.data$sub.cluster
-
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("0", "9", "4_0")] <- "CD14+ Monocytes"
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("10")] <- "FCGR3A+ Monocytes"
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("8", "11")] <- "B cells"
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("12_0")] <- "Plasma"
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("4_1")] <- "cDC"
-meta_integrated_obj_merge$CT[
-  meta_integrated_obj_merge$sub.cluster %in% c("12_1")] <- "pDC"
-
-table(meta_integrated_obj_merge$CT)
-
-# Merge this metadata back into full object
-tmp <- pbmc_integrated_sbclstr_4_12@meta.data
-tmp_join <- full_join(tmp, meta_integrated_obj_merge)
-pbmc_integrated_sbclstr_4_12@meta.data$CT <- tmp_join$CT
-
-table(pbmc_integrated_sbclstr_4_12@meta.data$CT)
-
-DimPlot(pbmc_integrated_sbclstr_4_12, group.by = "sub.cluster", 
-        reduction = "integrated_sct_umap",
-        label = T) 
-DimPlot(pbmc_integrated_sbclstr_4_12, group.by = "CT", label = T
+# Integrate the layers using the SCT values
+pbmc_merge_mye_pass2 <- IntegrateLayers(object = pbmc_merge_mye_pass2, 
+                                        method = RPCAIntegration,
+                                        assay = "SCT", # either specify here or run default assay to SCT
+                                        orig.reduction = "pca", 
+                                        new.reduction = "integrated.rpca",
+                                        verbose = FALSE,
+                                        normalization.method = "SCT", 
+                                        dims = 1:npcs,
+                                        k.weight = 25
 )
 
 
-#------------------------------------------------------------------------------#
-### Add CAR-T info to full object ----
-#------------------------------------------------------------------------------#
-DefaultAssay(pbmc_integrated_sbclstr_4_12) <- "RNA"
 
-pbmc_integrated_sbclstr_4_12@meta.data$IL13OPCounts <- pbmc_integrated_sbclstr_4_12@assays$RNA@counts["IL13OP",]
-pbmc_integrated_sbclstr_4_12@meta.data$CART <- ifelse(
-  (pbmc_integrated_sbclstr_4_12@meta.data$IL13OPCounts >= 3 & (pbmc_integrated_sbclstr_4_12@meta.data$CT == "CD8+ T" | pbmc_integrated_sbclstr_4_12@meta.data$CT == "CD4+ T" | pbmc_integrated_sbclstr_4_12@meta.data$CT == "Treg" )), "Positive", "Negative")
-
-table(pbmc_integrated_sbclstr_4_12@meta.data$CART)
+# Find neighbors and clusters, and create UMAP
+pbmc_merge_mye_pass2 <- FindNeighbors(pbmc_merge_mye_pass2, dims = 1:npcs, verbose = FALSE, reduction = "integrated.rpca")
+pbmc_merge_mye_pass2 <- RunUMAP(pbmc_merge_mye_pass2, dims = 1:npcs, verbose = FALSE, 
+                                reduction = "integrated.rpca", reduction.name = "umap.integrated.rpca")
+pbmc_merge_mye_pass2 <- FindClusters(pbmc_merge_mye_pass2, resolution = c(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8), verbose = FALSE)
 
 
 #------------------------------------------------------------------------------#
-### Add response information full object ----
+## Add cell type labels ----
 #------------------------------------------------------------------------------#
-pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle <- paste(pbmc_integrated_sbclstr_4_12@meta.data$UPN, pbmc_integrated_sbclstr_4_12@meta.data$Cycle, sep = "_")
-levels(as.factor(pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle))
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters <- NA
 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon <- NA # or any other initialization value
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_5"] <- "Non-Response" # Stable, I originally had this as response but after talking to Leo we decided to change this to stable/non-response
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_8"] <- "Response"
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_4"] <- "Response"
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_8"] <- "Non-Response" # Stable
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_11"] <- "Non-Response" # Progression
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_8"] <- "Non-Response" # Progression
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_3"] <- "Non-Response" # Pseudoprogression
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_1"] <- "Non-Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_3"] <- "Non-Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_4"] <- "Non-Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_1"] <- "Non-Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_7"] <- "Non-Response" 
-
-pbmc_integrated_sbclstr_4_12@meta.data$Responses <- NA # or any other initialization value
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_5"] <- "Stable" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_8"] <- "Response"
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_4"] <- "Response"
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_8"] <- "Stable"
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "514_11"] <- "Progression"
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "515_8"] <- "Progression"
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "574_3"] <- "Pseudoprogression" # Do we change to stable?
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_3"] <- "Progression" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "625_4"] <- "Progression" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_4"] <- "Response" 
-pbmc_integrated_sbclstr_4_12@meta.data$Responses[pbmc_integrated_sbclstr_4_12@meta.data$UPN_Cycle == "626_7"] <- "Progression" 
-
-table(pbmc_integrated_sbclstr_4_12@meta.data$ResponseNon)
-table(pbmc_integrated_sbclstr_4_12@meta.data$Responses)
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("0")] <- "Classical Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("1")] <- "S100 high, HLA class II low Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("2")] <- "Intermediate Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("3")] <- "Classical Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("4")] <- "Non-classical Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("5")] <- "Classical Monocyte"
+pbmc_merge_mye_pass2_join@meta.data$ct_clusters[
+  pbmc_merge_mye_pass2_join@meta.data$SCT_snn_res.0.2 %in% c("6")] <- "cDC2"
 
 
 #------------------------------------------------------------------------------#
-### Add lymphodepletion information full object ----
+## Add metadata ----
 #------------------------------------------------------------------------------#
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion <- NA # or any other initialization value
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "625"] <- "Lymphodepleted" 
-pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion[pbmc_integrated_sbclstr_4_12@meta.data$UPN == "626"] <- "Lymphodepleted" 
+# Response categories
+pbmc_merge_mye_pass2_join@meta.data$Response_cat <- "NA" # or any other initialization value
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "514_2"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "514_5"] <- "Non-response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "514_8"] <- "Response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "514_11"] <- "Non-response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "514_13"] <- "Non-response"
 
-table(pbmc_integrated_sbclstr_4_12@meta.data$Lymphodepletion)
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "515_4"] <- "Response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "515_8"] <- "Non-response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "574_1"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "574_3"] <- "Non-response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "574_8"] <- "Non-response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "689_1"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "689_4"] <- "Response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "689_8"] <- "Response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "689_12"] <- "Non-response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "689_17"] <- "Non-response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "692_2"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "692_4"] <- "Response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "705_1"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "705_5"] <- "Non-response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "705_8"] <- "Non-response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "716_2"] <- "Baseline"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "716_4"] <- "Response"
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "716_8"] <- "Response"
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "625_1"] <- "Baseline" 
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "625_3"] <- "Non-response" 
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "625_4"] <- "Non-response" 
+
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "626_1"] <- "Baseline" 
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "626_4"] <- "Response" 
+pbmc_merge_mye_pass2_join@meta.data$Response_cat[pbmc_merge_mye_pass2_join@meta.data$UPN_Cycle == "626_7"] <- "Non-response" 
+
+table(pbmc_merge_mye_pass2_join@meta.data$Response_cat)
+
+
+# add disease info
+pbmc_merge_mye_pass2_join@meta.data$tumor_type <- NA # or any other initialization value
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "514"] <- "Ependymoma"
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "574"] <- "Ependymoma"
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "625"] <- "Ependymoma" 
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "689"] <- "Ependymoma"
+
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "515"] <- "DMG"
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "626"] <- "DMG" 
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "692"] <- "DMG"
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "716"] <- "DMG"
+
+pbmc_merge_mye_pass2_join@meta.data$tumor_type[pbmc_merge_mye_pass2_join@meta.data$UPN == "705"] <- "Glioblastoma"
+
+head(pbmc_merge_mye_pass2_join@meta.data)
+
+
+# add lymphodepletion status
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion <- NA # or any other initialization value
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "514"] <- "Non-Lymphodepleted"
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "515"] <- "Non-Lymphodepleted"
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "574"] <- "Non-Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "625"] <- "Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "626"] <- "Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "689"] <- "Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "705"] <- "Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "716"] <- "Lymphodepleted" 
+pbmc_merge_mye_pass2_join@meta.data$Lymphodepletion[pbmc_merge_mye_pass2_join@meta.data$UPN == "692"] <- "Lymphodepleted" 
 
 
 #------------------------------------------------------------------------------#
-### Save object ----
+## Save ----
 #------------------------------------------------------------------------------#
-saveRDS(pbmc_integrated_sbclstr_4_12, 
-        "/scratch/aoill/projects/CAR-T/00_final/00_GEO_rds/PBMC_all_cells_obj_2023.rds")
-
+saveRDS(pbmc_merge_mye_pass2_join, "/scratch/aoill/projects/CAR-T/00_new_2025/geo_2026/pbmc_myeloid_seurat_obj.rds")
